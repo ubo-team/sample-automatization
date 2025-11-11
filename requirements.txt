@@ -1,0 +1,13 @@
+# Core app
+streamlit>=1.36.0
+pandas>=2.2.0
+numpy>=1.26.0
+
+# Excel reading/writing
+openpyxl>=3.1.2
+XlsxWriter>=3.1.2
+
+# Optional performance/caching (included with Streamlit)
+blinker>=1.7.0
+
+# For base64 encoding used in download links
