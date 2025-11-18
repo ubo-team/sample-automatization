@@ -745,6 +745,12 @@ if run_button:
         os_gender = oversample_inputs["Gjinia"]["value"]
         os_n = int(oversample_inputs["Gjinia"]["n"])
 
+        if os_n > n_total:
+            st.warning(
+            f"Vërejtje: Kuota e alokuar ({os_n}) për oversample tek ({os_gender}) është më i madh se N = ({n_total}). "
+            "Shëno një kuotë tjetër për oversample."
+        )
+
         # Popullsia sipas gjinisë per komunë
         pop_by_gender = (
             df_ga.groupby(["Komuna", "Gjinia"])[age_cols]
@@ -780,6 +786,12 @@ if run_button:
         os_min = params_age["min_age"]
         os_max = params_age["max_age"]
         os_n = int(params_age["n"])
+
+        if os_n > n_total:
+            st.warning(
+            f"Vërejtje: Kuota e alokuar ({os_n}) për oversample tek ({os_min}-{os_max}) është më i madh se N = ({n_total}). "
+            "Shëno një kuotë tjetër për oversample."
+        )
 
         # Lista e moshave që ekzistojnë në dataset
         age_cols_sorted = sorted(age_cols, key=lambda x: int(str(x)))
