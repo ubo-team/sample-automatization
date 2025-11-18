@@ -464,7 +464,6 @@ if oversample_enabled:
                 valid_kom = valid_kom[valid_kom > 0].index.tolist()
 
                 options = sorted(valid_kom)
-                print("Test")
 
 
             elif var == "Regjion":
@@ -755,15 +754,12 @@ if run_button:
             .reindex(pivot.index)
             .fillna(0)
             )
-        print(pop_by_gender)
 
         pop_os = pop_by_gender[os_gender]
         weight_os = pop_os / pop_os.sum()
-        print(sum(weight_os))
 
         # Alokimi për OS
         os_alloc = (weight_os * os_n).round().astype(int)
-        print(os_alloc)
 
         # Alokimi për pjesën tjetër
         leftover = pivot_totals - os_alloc
@@ -817,8 +813,6 @@ if run_button:
 
         pivot[age_label_os] = controlled_rounding(os_alloc_age, os_n)
         pivot[age_label_non] = pivot_totals - pivot[age_label_os]
-
-    print(pivot)
 
     # Safety: ensure global total matches n_total
     global_total = int(pivot["Total"].sum())
