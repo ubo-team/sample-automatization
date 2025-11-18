@@ -747,7 +747,7 @@ if run_button:
 
         if os_n > n_total:
             st.warning(
-            f"Vërejtje: Kuota e alokuar ({os_n}) për oversample tek ({os_gender}) është më i madh se N = ({n_total}). "
+            f"Vërejtje: Kuota e alokuar ({os_n}) për oversample tek ({os_gender}) është më e madhe se N = ({n_total}). "
             "Shëno një kuotë tjetër për oversample."
         )
 
@@ -789,7 +789,7 @@ if run_button:
 
         if os_n > n_total:
             st.warning(
-            f"Vërejtje: Kuota e alokuar ({os_n}) për oversample tek ({os_min}-{os_max}) është më i madh se N = ({n_total}). "
+            f"Vërejtje: Kuota e alokuar ({os_n}) për oversample tek ({os_min}-{os_max}) është më e madhe se N = ({n_total}). "
             "Shëno një kuotë tjetër për oversample."
         )
 
