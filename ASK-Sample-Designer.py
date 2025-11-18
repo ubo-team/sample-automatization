@@ -177,6 +177,73 @@ def compute_gender_age_coefficients(df_ga: pd.DataFrame,
     coef_by_komuna = df.groupby("Komuna").apply(calc_coef)
     return coef_by_komuna
 
+def compute_age_os_share(df_ga: pd.DataFrame,
+                         age_cols,
+                         selected_genders,
+                         global_min_age: int,
+                         global_max_age: int | None,
+                         os_min_age: int,
+                         os_max_age: int) -> pd.Series:
+    """
+    Kthen për secilën Komunë:
+    share_OS(komuna) = Pop( OS_min–OS_max ) / Pop( global_min–global_max )
+
+    – përdor vetëm gjinitë e zgjedhura te `selected_genders`
+    – nëse s'ka popullsi në intervalin global -> 0
+    """
+
+    df = df_ga.copy()
+
+    # Sorto kolonat e moshës
+    age_cols_sorted = sorted(age_cols, key=lambda x: int(str(x)))
+    max_available_age = int(str(age_cols_sorted[-1]))
+
+    # Global max nëse është None
+    if global_max_age is None:
+        global_max_age = max_available_age
+
+    # Konverto në int
+    global_min_age = int(global_min_age)
+    global_max_age = int(global_max_age)
+    os_min_age = int(os_min_age)
+    os_max_age = int(os_max_age)
+
+    # Kufizo OS brenda intervalit global
+    os_min_age = max(os_min_age, global_min_age)
+    os_max_age = min(os_max_age, global_max_age)
+
+    if os_min_age > os_max_age:
+        # Interval OS bosh -> gjithmonë 0
+        return pd.Series(0.0, index=df["Komuna"].unique())
+
+    global_cols = [
+        c for c in age_cols_sorted
+        if global_min_age <= int(str(c)) <= global_max_age
+    ]
+    os_cols = [
+        c for c in age_cols_sorted
+        if os_min_age <= int(str(c)) <= os_max_age
+    ]
+
+    df["Pop_global"] = df[global_cols].sum(axis=1)
+    df["Pop_os"] = df[os_cols].sum(axis=1)
+
+    def agg(group: pd.DataFrame) -> float:
+        if selected_genders:
+            group = group[group["Gjinia"].isin(selected_genders)]
+
+        pop_global = group["Pop_global"].sum()
+        if pop_global <= 0:
+            return 0.0
+
+        pop_os = group["Pop_os"].sum()
+        if pop_os <= 0:
+            return 0.0
+
+        return float(pop_os) / float(pop_global)
+
+    share_by_komuna = df.groupby("Komuna").apply(agg)
+    return share_by_komuna
 
 def controlled_rounding(values: np.ndarray,
                         total_n: int,
@@ -228,7 +295,45 @@ def controlled_rounding(values: np.ndarray,
         floors[idx] += final_diff
 
     return floors
+   
+# Helper to identify strata belonging to each oversample variable
+def mask_for_oversample(grouped, variable, params):
 
+    if variable == "Komuna":
+        return grouped[base_col] == params["value"]
+
+    if variable == "Regjion":
+        return grouped[base_col] == params["value"]
+
+    if variable == "Vendbanimi":
+        return grouped["Sub"].str.endswith(params["value"])
+
+    if variable == "Etnia":
+        return grouped["Sub"].str.startswith(params["value"])
+
+    if variable == "Gjinia":
+        if "Gjinia" in grouped.columns:
+            return grouped["Gjinia"] == params["value"]
+        else:
+            return pd.Series(False, index=grouped.index)
+
+    if variable == "Mosha":
+        # "OS" është segmenti i krijuar më herët
+        if "AgeSeg" in grouped.columns:
+            return grouped["AgeSeg"] == "OS"
+        return pd.Series(False, index=grouped.index)
+
+    return pd.Series(False, index=grouped.index)
+
+# Load data
+try:
+    df_eth = load_ethnicity_settlement_data("ASK-2024-Komuna-Etnia-Vendbanimi.xlsx")
+    df_ga, age_cols = load_gender_age_data("ASK-2024-Komuna-Gjinia-Mosha.xlsx")
+except Exception as e:
+    st.error(f"Gabim gjatë leximit të fajllave: {e}")
+    st.stop()
+
+region_map = get_region_mapping()
 
 # =========================
 # UI: SIDEBAR
@@ -265,6 +370,13 @@ st.sidebar.markdown("---")
 # Demographic filters
 st.sidebar.subheader("Filtrat demografikë")
 
+# Komuna filter
+komuna_filter = st.sidebar.multiselect(
+    "Komunat që përfshihen",
+    options=sorted(df_eth["Komuna"].unique()),
+    default=sorted(df_eth["Komuna"].unique())
+)
+
 gender_selected = st.sidebar.multiselect(
     "Gjinia për përfshirje në mostër",
     options=["Meshkuj", "Femra"],
@@ -296,7 +408,105 @@ settlement_filter = st.sidebar.multiselect(
     "Vendbanimi që përfshihet",
     options=["Urban", "Rural"],
     default=["Urban", "Rural"]
+
 )
+# Oversampling
+st.sidebar.markdown("---")
+
+oversample_enabled = st.sidebar.checkbox("Oversample", value=False)
+
+oversample_inputs = {}
+
+if oversample_enabled:
+
+    oversample_vars = st.sidebar.multiselect(
+        "Zgjidh deri në 2 variabla për oversample:",
+        options=["Regjion", "Komuna", "Vendbanimi", "Gjinia", "Etnia", "Mosha"],
+        max_selections=2
+    )
+
+    for var in oversample_vars:
+        st.sidebar.markdown(f"**{var}**")
+
+        if var == "Mosha":
+            min_over_age = st.sidebar.number_input(
+                f"Grupmosha minimale ({var})",
+                min_value=0, value=18, step=1,
+                key=f"min_{var}"
+            )
+            max_over_age = st.sidebar.number_input(
+                f"Grupmosha maksimale ({var})",
+                min_value=min_over_age, value=24, step=1,
+                key=f"max_{var}"
+            )
+            oversample_n = st.sidebar.number_input(
+                f"Numri i anketave për këtë grupmoshë",
+                min_value=1, value=50, step=10,
+                key=f"n_{var}"
+            )
+
+            oversample_inputs[var] = {
+                "min_age": min_over_age,
+                "max_age": max_over_age,
+                "n": oversample_n
+            }
+
+        else:
+            df_tmp = df_eth[
+                (df_eth["Etnia"].isin(eth_filter)) &
+                (df_eth["Vendbanimi"].isin(settlement_filter)) &
+                (df_eth["Komuna"].isin(komuna_filter))
+            ]
+            
+            if var == "Komuna":
+                # kufizojmë komunat që kanë popullsi > 0 pas filtrave bazë
+                valid_kom = df_tmp.groupby("Komuna")["Pop_base"].sum()
+                valid_kom = valid_kom[valid_kom > 0].index.tolist()
+
+                options = sorted(valid_kom)
+                print("Test")
+
+
+            elif var == "Regjion":
+                valid_kom = df_tmp.groupby("Komuna")["Pop_base"].sum()
+                valid_kom = valid_kom[valid_kom > 0].index.tolist()
+
+                valid_reg = {region_map[k] for k in valid_kom if k in region_map}
+
+                options = sorted(valid_reg)
+
+
+            elif var == "Vendbanimi":
+                options = sorted(settlement_filter) 
+
+            elif var == "Etnia":
+                options = sorted(eth_filter)          
+
+            elif var == "Gjinia":
+                options = sorted(gender_selected)
+
+            elif var == "Mosha":
+                # Zgjedhja për moshën nuk kufizohet
+                options = []
+
+            else:
+                options = []
+
+            val = st.sidebar.selectbox(
+                f"Njësia nga {var} që do të jetë oversample",
+                options=options,
+                key=f"val_{var}"
+            )
+            oversample_n = st.sidebar.number_input(
+                f"Numri i anketave për {var} = {val}",
+                min_value=1, value=50, step=10,
+                key=f"n_{var}"
+            )
+
+            oversample_inputs[var] = {
+                "value": val,
+                "n": oversample_n
+            }
 
 st.sidebar.markdown("---")
 
@@ -309,22 +519,13 @@ run_button = st.sidebar.button("Gjenero shpërndarjen e mostrës")
 # MAIN LOGIC
 # =========================
 
-# Load data
-try:
-    df_eth = load_ethnicity_settlement_data("ASK-2024-Komuna-Etnia-Vendbanimi.xlsx")
-    df_ga, age_cols = load_gender_age_data("ASK-2024-Komuna-Gjinia-Mosha.xlsx")
-except Exception as e:
-    st.error("Gabim gjatë leximit të fajllave. Sigurohu që fajllat ekzistojnë dhe emrat janë korrekt.")
-    st.stop()
-
-region_map = get_region_mapping()
-
 if run_button:
 
     # 1) Filter ethnicity & settlement (these are demographic filters)
     df = df_eth.copy()
     df = df[df["Etnia"].isin(eth_filter)]
     df = df[df["Vendbanimi"].isin(settlement_filter)]
+    df = df[df["Komuna"].isin(komuna_filter)]
 
     if df.empty:
         st.error("Asnjë kombinim nuk përputhet me filtrat e zgjedhur (Etnia/Vendbanimi).")
@@ -338,6 +539,14 @@ if run_button:
         min_age=min_age,
         max_age=max_age
     )
+
+    # Mapojmë gjininë origjinale në df_eth duke përdorur df_ga si referencë
+    gender_map = df_ga.groupby("Komuna")["Gjinia"].apply(list).to_dict()
+
+    df["Gjinia"] = df["Komuna"].map(lambda k: gender_map.get(k, ["Meshkuj","Femra"]))
+                    
+    # zgjerim i rreshtave për çdo gjini (ndryshe OS nuk punon)
+    df = df.explode("Gjinia")
 
     # Attach coefficient to df (missing komuna -> coef 0)
     df["coef_gender_age"] = df["Komuna"].map(coef_by_komuna).fillna(0.0)
@@ -382,12 +591,17 @@ if run_button:
     else:
         df["Sub"] = "Total"
 
-    # 6) Aggregate adjusted population by (primary, sub)
     grouped = (
         df.groupby([base_col, "Sub"], as_index=False)["Pop_adj"]
         .sum()
         .rename(columns={"Pop_adj": "Pop_stratum"})
     )
+
+    grouped = grouped.reset_index(drop=True)
+
+    precomputed_masks = {}
+    for var, params in oversample_inputs.items():
+        precomputed_masks[var] = mask_for_oversample(grouped, var, params)
 
     # Sort columns
     sub_order = []
@@ -406,16 +620,106 @@ if run_button:
         st.error("Popullsia totale pas filtrave është 0. Nuk mund të alokohet mostra.")
         st.stop()
 
-    # 7) Proportional float allocations
-    grouped["n_float"] = n_total * grouped["Pop_stratum"] / total_pop
+    # ================================
+    # 7a) Oversampling
+    # ================================
 
-    # 8) Controlled rounding (sum-preserving)
-    grouped = grouped.sort_values([base_col, "Sub"]).reset_index(drop=True)
-    grouped["n_alloc"] = controlled_rounding(
-        grouped["n_float"].to_numpy(),
-        total_n=n_total,
-        seed=int(seed)
-    )
+    grouped["n_alloc"] = 0
+
+    oversample_items = list(oversample_inputs.items())
+
+    # Helper për alokim proporcional në një maskë
+    def alloc_to_mask(mask: pd.Series, quota: int) -> pd.Series:
+        out = pd.Series(0.0, index=grouped.index)
+        quota = int(quota)
+        if quota <= 0:
+            return out
+
+        df_sub = grouped[mask].copy()
+        if df_sub.empty:
+            return out
+
+        weights = df_sub["Pop_stratum"] / df_sub["Pop_stratum"].sum()
+        floats = weights * quota
+        ints = controlled_rounding(floats.to_numpy(), quota, seed)
+        out.loc[df_sub.index] = ints
+        return out
+
+    # 0) Nuk ka oversample fare → alokim i thjeshtë proporcional
+    if not oversample_items:
+        total_pop = grouped["Pop_stratum"].sum()
+        weights = grouped["Pop_stratum"] / total_pop
+        floats = weights * n_total
+        grouped["n_alloc"] = controlled_rounding(floats.to_numpy(), n_total, seed)
+
+    # 1) Vetëm një oversample
+    elif len(oversample_items) == 1:
+        varA, paramsA = oversample_items[0]
+        nA = int(paramsA["n"])
+
+        maskA = mask_for_oversample(grouped, varA, paramsA)
+
+        # Alokim i OS‐it në maskA
+        alloc_A = alloc_to_mask(maskA, nA)
+        used_A = int(alloc_A.sum())
+
+        # Pjesa e mbetur shkon në stratum‐et jashtë OS
+        remaining = n_total - used_A
+        if remaining < 0:
+            remaining = 0
+
+        mask_rest = ~maskA
+        alloc_rest = alloc_to_mask(mask_rest, remaining)
+
+        grouped["n_alloc"] = alloc_A + alloc_rest
+
+    # 2) Dy variabla oversample (rasti i overlapp‐it)
+    else:
+        # =========================================
+        # PATCH 3 — Oversample me dy variabla
+        # =========================================
+
+        (varA, paramsA), (varB, paramsB) = oversample_items[:2]
+        nA = int(paramsA["n"])
+        nB = int(paramsB["n"])
+
+        maskA = precomputed_masks[varA]
+        maskB = precomputed_masks[varB]
+
+        # 1) Shpërndaj OS_B (p.sh. Rural = 800)
+        alloc_B = alloc_to_mask(maskB, nB)
+
+        # 2) Overlap: pjesa që OS_B jep brenda OS_A
+        overlap_mask = maskA & maskB
+        overlap_from_B = int(alloc_B[overlap_mask].sum())
+
+        # 3) Pjesa që i mungon OS_A mbi overlapp
+        remaining_A = max(nA - overlap_from_B, 0)
+        alloc_A_extra = alloc_to_mask(maskA & ~maskB, remaining_A)
+
+        # 4) Union i dy OS-ve
+        total_os_used = int(alloc_B.sum() + alloc_A_extra.sum())
+
+        remaining = max(n_total - total_os_used, 0)
+        alloc_rest = alloc_to_mask(~(maskA | maskB), remaining)
+
+        grouped["n_alloc"] = alloc_B + alloc_A_extra + alloc_rest
+
+    # ================================
+    # 8) Heq kolonat që s'duhen para pivot-it
+    # ================================
+    drop_cols = []
+    if "Gjinia" in grouped.columns:
+        drop_cols.append("Gjinia")
+    if "AgeSeg" in grouped.columns:
+        drop_cols.append("AgeSeg")
+
+    if drop_cols:
+        grouped = (
+            grouped.groupby([base_col, "Sub"])[["Pop_stratum", "n_alloc"]]
+                .sum()
+                .reset_index()
+        )
 
     # 9) Prepare pivot table: rows = primary, columns = sub-dimensions
     pivot = grouped.pivot(
@@ -426,10 +730,95 @@ if run_button:
 
     # Add total per primary
     pivot["Total"] = pivot.sum(axis=1)
+    
+    # ==========================================================
+    #  OVERSAMPLE GENDER/MOSHA pas pivot (në nivel KOMUNE)
+    # ==========================================================
 
-    # Remove rows where total = 0 (no allocated interviews)
-    pivot = pivot[pivot["Total"] > 0]
+     # Marrim TOTAL-in e komunës nga pivot
+    pivot_totals = pivot["Total"].copy()
 
+        # -------------------------
+        # 1) GJINIA
+        # -------------------------
+    if "Gjinia" in oversample_inputs:
+
+        os_gender = oversample_inputs["Gjinia"]["value"]
+        os_n = int(oversample_inputs["Gjinia"]["n"])
+
+        # Popullsia sipas gjinisë per komunë
+        pop_by_gender = (
+            df_ga.groupby(["Komuna", "Gjinia"])[age_cols]
+            .sum()
+            .sum(axis=1)
+            .unstack(fill_value=0)
+            .reindex(pivot.index)
+            .fillna(0)
+            )
+        print(pop_by_gender)
+
+        pop_os = pop_by_gender[os_gender]
+        weight_os = pop_os / pop_os.sum()
+        print(sum(weight_os))
+
+        # Alokimi për OS
+        os_alloc = (weight_os * os_n).round().astype(int)
+        print(os_alloc)
+
+        # Alokimi për pjesën tjetër
+        leftover = pivot_totals - os_alloc
+
+        if os_gender == "Femra":
+            pivot["Femra"] = controlled_rounding(os_alloc, os_n)
+            pivot["Meshkuj"] = pivot_totals - pivot["Femra"]
+        else:
+            pivot["Meshkuj"] = controlled_rounding(os_alloc, os_n)
+            pivot["Femra"] = pivot_totals - pivot["Meshkuj"]
+
+        # -------------------------
+        # 2) MOSHA
+        # -------------------------
+    if "Mosha" in oversample_inputs:
+
+        params_age = oversample_inputs["Mosha"]
+        os_min = params_age["min_age"]
+        os_max = params_age["max_age"]
+        os_n = int(params_age["n"])
+
+        # Lista e moshave që ekzistojnë në dataset
+        age_cols_sorted = sorted(age_cols, key=lambda x: int(str(x)))
+
+        # Grupi OS (18–30 p.sh.)
+        range_os = [c for c in age_cols_sorted if os_min <= int(c) <= os_max]
+
+        # Grupi jashtë OS (31+ p.sh.)
+        range_non = [c for c in age_cols_sorted if int(c) > os_max]
+
+        # Popullsia sipas moshës per komunë
+        pop_by_age = (
+            df_ga.groupby("Komuna")[age_cols_sorted]
+            .sum()
+            .reindex(pivot.index)
+            .fillna(0)
+            )
+
+        pop_os = pop_by_age[range_os].sum(axis=1)
+        pop_non = pop_by_age[range_non].sum(axis=1)
+
+        # Pesha për OS
+        weight_os_age = pop_os / pop_os.sum()
+
+        # 1) SHPËRNDA OS për moshë
+        os_alloc_age = (weight_os_age * os_n).round().astype(int)
+
+        # 2) Alokimi final për moshë
+        age_label_os = f"{os_min}–{os_max}"
+        age_label_non = f"{os_max+1}+"
+
+        pivot[age_label_os] = controlled_rounding(os_alloc_age, os_n)
+        pivot[age_label_non] = pivot_totals - pivot[age_label_os]
+
+    print(pivot)
 
     # Safety: ensure global total matches n_total
     global_total = int(pivot["Total"].sum())
@@ -466,18 +855,17 @@ if run_button:
     if caption_extra:
         st.caption(caption_extra)
 
-
     st.dataframe(pivot, use_container_width=True)
 
     if global_total != n_total:
         st.warning(
-            f"Vërejtje: Totali i alokuar ({global_total}) nuk përputhet me n_total ({n_total}). "
+            f"Vërejtje: Totali i alokuar ({global_total}) nuk përputhet me N = ({n_total}). "
             "Kontrollo koeficientët dhe numerikën."
         )
 
     # 10) Show long format result (optional, më teknik)
     with st.expander("Shfaq tabelën e plotë të stratum-eve (long format)", expanded=False):
-        display_cols = [base_col, "Sub", "Pop_stratum", "n_float", "n_alloc"]
+        display_cols = [base_col, "Sub", "Pop_stratum", "n_alloc"]
         st.dataframe(grouped[display_cols], use_container_width=True)
 
     # 11) Download buttons (secila tabelë veç e veç në Excel)
@@ -531,8 +919,6 @@ if run_button:
         filename="mostra_strata.xlsx",
         label="Shkarko Strata"
     )
-
-
 
 else:
     st.info("Cakto parametrat kryesorë dhe kliko **'Gjenero shpërndarjen e mostrës'** për të dizajnuar mostrën.")
