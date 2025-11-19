@@ -325,6 +325,141 @@ def mask_for_oversample(grouped, variable, params):
 
     return pd.Series(False, index=grouped.index)
 
+def fix_minimum_allocations(
+    pivot: pd.DataFrame,
+    df_eth: pd.DataFrame,
+    region_map: dict,
+    min_total: int = 3,
+    min_eth: int = 3,      # threshold for removing (total eth < 3)
+    min_vb: int = 2        # not used for ethnicity removal now, only for settlement logic
+) -> pd.DataFrame:
+
+    print("\n---- FIX START ----\n")
+
+    pivot_fixed = pivot.copy()
+    municipalities = list(pivot_fixed.index)
+
+    # region lookup
+    region_of = pivot_fixed.index.to_series().map(region_map)
+
+    # store initial totals for receiver limit
+    initial_total = pivot_fixed["Total"].copy()
+
+    # identify ethnicity columns (Shqiptar, Serb, Tjeter)
+    eth_cols = [c for c in pivot_fixed.columns if any(x in c for x in ["Shqiptar", "Serb", "Tjerë"])]
+
+    # map majority ethnicity by true population
+    def compute_majority(kom):
+        subset = df_eth[df_eth["Komuna"] == kom]
+        s = subset.groupby("Etnia")["Pop_base"].sum()
+        if s.empty:
+            return None
+        return s.idxmax()
+
+    majority = {k: compute_majority(k) for k in municipalities}
+
+    # allowed matrix (columns that existed initially)
+    allowed = (pivot > 0)
+
+    # helper — find receivers for ethnicity
+    def receiver_candidates(eth, col, kom):
+        receivers = []
+        for r in municipalities:
+            if r == kom:
+                continue
+
+            # SERB and SHQIPTAR have strict rules
+            if eth in ["Serb", "Shqiptar"]:
+                if majority[r] != eth:
+                    continue
+                if not allowed.at[r, col]:
+                    continue
+
+            # Tjetër has no majority or allowed restriction
+            if eth == "Tjerë":
+                if not allowed.at[r, col]:
+                    continue
+
+            # receiver limit check
+            if pivot_fixed.at[r, "Total"] >= initial_total[r] + 3:
+                continue
+
+            receivers.append(r)
+
+        # region-first
+        in_region = [r for r in receivers if region_of[r] == region_of[kom]]
+        if in_region:
+            return in_region
+        
+        return receivers
+
+    # -----------------------------------------------------
+    # ETHNIC REALLOCATION (core logic)
+    # -----------------------------------------------------
+    # We keep Urban/Rural separately, but remove all
+    # units for an ethnicity if total < 3
+    # -----------------------------------------------------
+    ethnic_groups = {
+        "Shqiptar": [c for c in eth_cols if c.startswith("Shqiptar")],
+        "Serb":     [c for c in eth_cols if c.startswith("Serb")],
+        "Tjerë":   [c for c in eth_cols if c.startswith("Tjerë")]
+    }
+
+    for kom in municipalities:
+        if kom == "Total":
+            continue
+
+        for eth, cols in ethnic_groups.items():
+
+            # total across Urban/Rural
+            total_eth = sum(pivot_fixed.at[kom, c] for c in cols)
+
+            # OK if >= 3
+            if total_eth >= 3:
+                continue
+
+            # nothing to remove if 0
+            if total_eth == 0:
+                continue
+
+            # number of units to remove = all units
+            units_to_move = total_eth
+
+            # move Urban first then Rural (or reverse)
+            for col in cols:
+                while pivot_fixed.at[kom, col] > 0:
+
+                    # find receivers
+                    recv_list = receiver_candidates(eth, col, kom)
+
+                    if not recv_list:
+                        # no available receivers → stop trying
+                        print(f"[WARNING] No receivers found for {eth} / {col} from {kom}")
+                        break
+
+                    recv = recv_list[0]
+
+                    # transfer 1 unit FROM kom TO recv
+                    pivot_fixed.at[kom, col] -= 1
+                    pivot_fixed.at[recv, col] += 1
+
+                    pivot_fixed.at[kom, "Total"] -= 1
+                    pivot_fixed.at[recv, "Total"] += 1
+
+    # -----------------------------------------------------
+    # RECOMPUTE TOTALS
+    # -----------------------------------------------------
+
+    subs = [c for c in pivot_fixed.columns if c not in ["Total"]]
+    pivot_fixed["Total"] = pivot_fixed[subs].sum(axis=1)
+
+    # Ribëj totalin e fundit
+    pivot_fixed.loc["Total"] = pivot_fixed.sum(numeric_only=True)
+
+
+    print("\n---- FIX END ----\n")
+    return pivot_fixed
+
 # Load data
 try:
     df_eth = load_ethnicity_settlement_data("ASK-2024-Komuna-Etnia-Vendbanimi.xlsx")
@@ -428,6 +563,9 @@ if oversample_enabled:
     for var in oversample_vars:
         st.sidebar.markdown(f"**{var}**")
 
+        # ============================
+        # 1) SPECIAL CASE: MOSHA
+        # ============================
         if var == "Mosha":
             min_over_age = st.sidebar.number_input(
                 f"Grupmosha minimale ({var})",
@@ -440,72 +578,91 @@ if oversample_enabled:
                 key=f"max_{var}"
             )
             oversample_n = st.sidebar.number_input(
-                f"Numri i anketave për këtë grupmoshë",
+                f"Numri i anketave për {min_over_age}–{max_over_age}",
                 min_value=1, value=50, step=10,
                 key=f"n_{var}"
             )
 
-            oversample_inputs[var] = {
+            oversample_inputs[var] = [{
                 "min_age": min_over_age,
                 "max_age": max_over_age,
                 "n": oversample_n
-            }
+            }]
+            continue
+
+        # ============================
+        # 2) Merr opsionet e vlefshme
+        # ============================
+        df_tmp = df_eth[
+            (df_eth["Etnia"].isin(eth_filter)) &
+            (df_eth["Vendbanimi"].isin(settlement_filter)) &
+            (df_eth["Komuna"].isin(komuna_filter))
+        ]
+
+        if var == "Komuna":
+            valid_kom = df_tmp.groupby("Komuna")["Pop_base"].sum()
+            valid_kom = valid_kom[valid_kom > 0].index.tolist()
+            options = sorted(valid_kom)
+            allow_multiple = True
+
+        elif var == "Etnia":
+            options = sorted(eth_filter)
+            allow_multiple = True
+
+        elif var == "Regjion":
+            valid_kom = df_tmp.groupby("Komuna")["Pop_base"].sum()
+            valid_kom = valid_kom[valid_kom > 0].index.tolist()
+            valid_reg = {region_map[k] for k in valid_kom if k in region_map}
+            options = sorted(valid_reg)
+            allow_multiple = False
+
+        elif var == "Vendbanimi":
+            options = sorted(settlement_filter)
+            allow_multiple = False
+
+        elif var == "Gjinia":
+            options = sorted(gender_selected)
+            allow_multiple = False
 
         else:
-            df_tmp = df_eth[
-                (df_eth["Etnia"].isin(eth_filter)) &
-                (df_eth["Vendbanimi"].isin(settlement_filter)) &
-                (df_eth["Komuna"].isin(komuna_filter))
-            ]
-            
-            if var == "Komuna":
-                # kufizojmë komunat që kanë popullsi > 0 pas filtrave bazë
-                valid_kom = df_tmp.groupby("Komuna")["Pop_base"].sum()
-                valid_kom = valid_kom[valid_kom > 0].index.tolist()
+            options = []
+            allow_multiple = False
 
-                options = sorted(valid_kom)
+        # ============================
+        # 3) UI: multiselect vetëm për Komuna/Etnia
+        # ============================
+        if allow_multiple:
+            selected_values = st.sidebar.multiselect(
+                f"Zgjidh {var} për oversample (multiple allowed)",
+                options=options,
+                key=f"multi_{var}"
+            )
 
+            entry_list = []
+            for v in selected_values:
+                q = st.sidebar.number_input(
+                    f"Kuota për {var} = {v}",
+                    min_value=1, value=50, step=10,
+                    key=f"quota_{var}_{v}"
+                )
+                entry_list.append({"value": v, "n": q})
 
-            elif var == "Regjion":
-                valid_kom = df_tmp.groupby("Komuna")["Pop_base"].sum()
-                valid_kom = valid_kom[valid_kom > 0].index.tolist()
+            oversample_inputs[var] = entry_list
 
-                valid_reg = {region_map[k] for k in valid_kom if k in region_map}
-
-                options = sorted(valid_reg)
-
-
-            elif var == "Vendbanimi":
-                options = sorted(settlement_filter) 
-
-            elif var == "Etnia":
-                options = sorted(eth_filter)          
-
-            elif var == "Gjinia":
-                options = sorted(gender_selected)
-
-            elif var == "Mosha":
-                # Zgjedhja për moshën nuk kufizohet
-                options = []
-
-            else:
-                options = []
-
+        else:
             val = st.sidebar.selectbox(
                 f"Njësia nga {var} që do të jetë oversample",
                 options=options,
                 key=f"val_{var}"
             )
-            oversample_n = st.sidebar.number_input(
-                f"Numri i anketave për {var} = {val}",
+            q = st.sidebar.number_input(
+                f"Kuota për {var} = {val}",
                 min_value=1, value=50, step=10,
-                key=f"n_{var}"
+                key=f"quota_{var}_{val}"
             )
 
-            oversample_inputs[var] = {
-                "value": val,
-                "n": oversample_n
-            }
+            oversample_inputs[var] = [{"value": val, "n": q}]
+
 
 st.sidebar.markdown("---")
 
@@ -599,8 +756,9 @@ if run_button:
     grouped = grouped.reset_index(drop=True)
 
     precomputed_masks = {}
-    for var, params in oversample_inputs.items():
-        precomputed_masks[var] = mask_for_oversample(grouped, var, params)
+    for var, entry_list in oversample_inputs.items():
+        for entry in entry_list:
+            precomputed_masks[var] = mask_for_oversample(grouped, var, entry)
 
     # Sort columns
     sub_order = []
@@ -619,10 +777,33 @@ if run_button:
         st.error("Popullsia totale pas filtrave është 0. Nuk mund të alokohet mostra.")
         st.stop()
 
+    all_os = []
+
+    for var, entries in oversample_inputs.items():
+        for entry in entries:
+
+            mask = mask_for_oversample(grouped, var, entry)
+
+            # MOSHA ka strukturë ndryshe → nuk ka "value"
+            if var == "Mosha":
+                all_os.append({
+                    "var": var,
+                    "value": f"{entry['min_age']}-{entry['max_age']}",
+                    "n": entry["n"],
+                    "mask": mask
+                })
+            else:
+                # Komuna, Etnia, Regjioni, Vendbanimi, Gjinia
+                all_os.append({
+                    "var": var,
+                    "value": entry["value"],
+                    "n": entry["n"],
+                    "mask": mask
+                })
+
     # ================================
     # 7a) Oversampling
     # ================================
-
     grouped["n_alloc"] = 0
 
     oversample_items = list(oversample_inputs.items())
@@ -653,56 +834,71 @@ if run_button:
 
     # 1) Vetëm një oversample
     elif len(oversample_items) == 1:
-        varA, paramsA = oversample_items[0]
-        nA = int(paramsA["n"])
+        varA, entry_list = oversample_items[0]
 
-        maskA = mask_for_oversample(grouped, varA, paramsA)
+        # fillo me zero
+        grouped["n_alloc"] = 0
 
-        # Alokim i OS‐it në maskA
-        alloc_A = alloc_to_mask(maskA, nA)
-        used_A = int(alloc_A.sum())
+        # për çdo kuotë të atij variabli
+        used_total = 0
+        for entry in entry_list:
+            nA = int(entry["n"])
+            maskA = mask_for_oversample(grouped, varA, entry)
 
-        # Pjesa e mbetur shkon në stratum‐et jashtë OS
-        remaining = n_total - used_A
+            alloc_A = alloc_to_mask(maskA, nA)
+            grouped["n_alloc"] += alloc_A
+            used_total += int(alloc_A.sum())
+
+        # pjesa e mbetur shkon tek stratat tjera
+        remaining = n_total - used_total
         if remaining < 0:
             remaining = 0
 
-        mask_rest = ~maskA
+        mask_rest = (grouped["n_alloc"] == 0)
         alloc_rest = alloc_to_mask(mask_rest, remaining)
 
-        grouped["n_alloc"] = alloc_A + alloc_rest
+        grouped["n_alloc"] += alloc_rest
 
-    # 2) Dy variabla oversample (rasti i overlapp‐it)
+    # 2) Dy variabla oversample (me shumë vlera për njërin variabël)
     else:
-        # =========================================
-        # PATCH 3 — Oversample me dy variabla
-        # =========================================
+        # ndërto listën e plotë që i ke më lart
+        # all_os = [ {var, value, n, mask}, ... ]
 
-        (varA, paramsA), (varB, paramsB) = oversample_items[:2]
-        nA = int(paramsA["n"])
-        nB = int(paramsB["n"])
+        # Renditi sipas kuotës zbritëse
+        all_os_sorted = sorted(all_os, key=lambda x: x["n"], reverse=True)
 
-        maskA = precomputed_masks[varA]
-        maskB = precomputed_masks[varB]
+        # OS_B = variabli me kuotën më të lartë (p.sh. Rural=800)
+        osB = all_os_sorted[0]
 
-        # 1) Shpërndaj OS_B (p.sh. Rural = 800)
-        alloc_B = alloc_to_mask(maskB, nB)
+        # OS_A = të gjithë tjerët (p.sh. Peja=300, Prishtina=500, Gjakova=200)
+        osA_list = all_os_sorted[1:]
 
-        # 2) Overlap: pjesa që OS_B jep brenda OS_A
-        overlap_mask = maskA & maskB
-        overlap_from_B = int(alloc_B[overlap_mask].sum())
+        # 1) shpërndaj OS_B
+        alloc_B = alloc_to_mask(osB["mask"], osB["n"])
 
-        # 3) Pjesa që i mungon OS_A mbi overlapp
-        remaining_A = max(nA - overlap_from_B, 0)
-        alloc_A_extra = alloc_to_mask(maskA & ~maskB, remaining_A)
+        grouped["n_alloc"] = alloc_B
 
-        # 4) Union i dy OS-ve
-        total_os_used = int(alloc_B.sum() + alloc_A_extra.sum())
+        # 2) pastaj secilin OS_A një nga një
+        for osA in osA_list:
 
-        remaining = max(n_total - total_os_used, 0)
-        alloc_rest = alloc_to_mask(~(maskA | maskB), remaining)
+            # llogarit overlapp
+            overlap_mask = osA["mask"] & osB["mask"]
+            overlap_from_B = int(alloc_B[overlap_mask].sum())
 
-        grouped["n_alloc"] = alloc_B + alloc_A_extra + alloc_rest
+            remaining_A = max(osA["n"] - overlap_from_B, 0)
+
+            alloc_A = alloc_to_mask(osA["mask"] & ~osB["mask"], remaining_A)
+
+            grouped["n_alloc"] += alloc_A
+
+        # 3) pjesa e mbetur shkon jashtë OS-ve
+        used = int(grouped["n_alloc"].sum())
+        remaining = max(n_total - used, 0)
+
+        mask_rest = ~(sum(os["mask"] for os in all_os) > 0)
+        alloc_rest = alloc_to_mask(mask_rest, remaining)
+
+        grouped["n_alloc"] += alloc_rest
 
     # ================================
     # 8) Heq kolonat që s'duhen para pivot-it
@@ -742,8 +938,8 @@ if run_button:
         # -------------------------
     if "Gjinia" in oversample_inputs:
 
-        os_gender = oversample_inputs["Gjinia"]["value"]
-        os_n = int(oversample_inputs["Gjinia"]["n"])
+        os_gender = oversample_inputs["Gjinia"][0]["value"]
+        os_n = int(oversample_inputs["Gjinia"][0]["n"])
 
         if os_n > n_total:
             st.warning(
@@ -782,7 +978,7 @@ if run_button:
         # -------------------------
     if "Mosha" in oversample_inputs:
 
-        params_age = oversample_inputs["Mosha"]
+        params_age = oversample_inputs["Mosha"][0]
         os_min = params_age["min_age"]
         os_max = params_age["max_age"]
         os_n = int(params_age["n"])
@@ -826,10 +1022,18 @@ if run_button:
         pivot[age_label_os] = controlled_rounding(os_alloc_age, os_n)
         pivot[age_label_non] = pivot_totals - pivot[age_label_os]
 
+    pivot_old = pivot.copy()
+    
+    pivot = fix_minimum_allocations(
+            pivot=pivot,
+            df_eth= df_eth,
+            region_map=region_map,
+            min_total=3,   # minimum anketa per komunë
+            min_eth=3      # minimum per vendbanim (Urban/Rural)
+        )
+    
     # Safety: ensure global total matches n_total
-    global_total = int(pivot["Total"].sum())
-
-    pivot.loc["Total"] = pivot.sum(numeric_only=True)
+    global_total = int(pivot.loc["Total", "Total"])
 
     st.subheader("Tabela e ndarjes së mostrës")
 
@@ -909,6 +1113,30 @@ if run_button:
         """
         st.markdown(button_html, unsafe_allow_html=True)
 
+    def create_download_link2(file_bytes: bytes, filename: str, label: str):
+        """Create full-width HTML download button (without rerun)."""
+        b64 = base64.b64encode(file_bytes).decode()
+        button_html = f"""
+            <a href="data:application/octet-stream;base64,{b64}" download="{filename}" style="text-decoration:none;">
+                <div style="
+                    background-color:#407FBA;
+                    color:white;
+                    text-align:center;
+                    font-weight:500;
+                    font-size:16px;
+                    padding:10px;
+                    border-radius:8px;
+                    margin-top:8px;
+                    width:100%;
+                    box-sizing:border-box;
+                    cursor:pointer;
+                ">
+                {label}
+                </div>
+            </a>
+        """
+        st.markdown(button_html, unsafe_allow_html=True)
+
 
     # 📘 Pivot table (Excel)
     pivot_excel = df_to_excel_bytes(pivot, sheet_name="Mostra")
@@ -920,10 +1148,18 @@ if run_button:
 
     # 📘 Strata table (Excel)
     strata_excel = df_to_excel_bytes(grouped, sheet_name="Strata")
-    create_download_link(
+    create_download_link2(
         file_bytes=strata_excel,
         filename="mostra_strata.xlsx",
         label="Shkarko Strata"
+    )
+
+    # 📘 Old Pivot table (Excel)
+    strata_excel = df_to_excel_bytes(pivot_old, sheet_name="Shpërndarja fillestare")
+    create_download_link2(
+        file_bytes=strata_excel,
+        filename="shpërndarja_fillestare.xlsx",
+        label="Shkarko Shpërndarjen Fillestare"
     )
 
 else:
