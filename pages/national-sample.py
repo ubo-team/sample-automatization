@@ -6,7 +6,7 @@ st.markdown("""
     <div style='width: 100%; padding: 20px 30px; background: #ffffff;
                 border-bottom: 1px solid #e6e6e6; display: flex;
                 justify-content: space-between; align-items: center;'>
-        <a href="/" style='font-size: 18px; font-weight: 600; color: #1a73e8;
+        <a href="/" style='font-size: 18px; font-weight: 600; color: #344b77;
                 text-decoration: none;'>← Home</a>
     </div>
 """
@@ -14,6 +14,23 @@ st.markdown("""
 
 st.markdown("""
 <style>
+            
+/* Buttons */
+.stButton > button {
+    padding: 10px 18px !important;
+    font-size: 16px !important;
+    font-weight: 600 !important;
+    border-radius: 10px !important;
+    border: 2px solid #344b77 !important;
+    color: #344b77 !important;
+    background: #fff !important;
+    transition: 0.25s ease !important;
+}
+            
+.stButton > button:hover {
+    background: #344b77 !important;
+    color: white !important;
+}
 
 /* Hide only page navigation links, keep widgets **/
 [data-testid="stSidebarNav"] li {
@@ -1122,7 +1139,7 @@ if run_button:
         button_html = f"""
             <a href="data:application/octet-stream;base64,{b64}" download="{filename}" style="text-decoration:none;">
                 <div style="
-                    background-color:#0054a3;
+                    background-color:#344b77;
                     color:white;
                     text-align:center;
                     font-weight:500;
@@ -1146,7 +1163,7 @@ if run_button:
         button_html = f"""
             <a href="data:application/octet-stream;base64,{b64}" download="{filename}" style="text-decoration:none;">
                 <div style="
-                    background-color:#407FBA;
+                    background-color:#5b8fb8;
                     color:white;
                     text-align:center;
                     font-weight:500;

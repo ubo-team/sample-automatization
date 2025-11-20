@@ -38,7 +38,7 @@ st.markdown("""
 }
             
 .stVerticalBlock > div:nth-child(2) {
-    width: 100% !important
+    width: 80% !important
 }
 
 /* Center each column content */
@@ -76,14 +76,14 @@ st.markdown("""
     font-size: 16px !important;
     font-weight: 600 !important;
     border-radius: 10px !important;
-    border: 2px solid #1a73e8 !important;
-    color: #1a73e8 !important;
+    border: 2px solid #344b77 !important;
+    color: #344b77 !important;
     background: #fff !important;
     transition: 0.25s ease !important;
 }
-
+            
 .stButton > button:hover {
-    background: #1a73e8 !important;
+    background: #344b77 !important;
     color: white !important;
 }
 
@@ -115,7 +115,7 @@ def menu_column(title, description, page, image_path, key):
     st.markdown(f"<div class='col-text'>{description}</div>", unsafe_allow_html=True)
 
     # Button
-    if st.button(title, key=key):
+    if st.button("Fillo gjenerimin", key=key):
         st.switch_page(page)
 
     st.markdown("</div>", unsafe_allow_html=True)
@@ -139,7 +139,7 @@ col1, col2, col3 = st.columns(3)
 with col1:
     menu_column(
         "Mostra nacionale",
-        "Gjeneroni ndarjen e mostrës në nivel nacional.",
+        "Gjeneroni ndarjen e mostrës në nivel nacional sipas komunës/regjionit, etnisë dhe vendbanimit. Lejon aplikimin e filterëve demografikë dhe oversampling.",
         "pages/national-sample.py",
         "images/nation.png",
         "btn_nat"
@@ -148,7 +148,7 @@ with col1:
 with col2:
     menu_column(
         "Mostra komunale",
-        "Dizajnoni mostrën sipas komunave të përzgjedhura.",
+        "Gjeneroni ndarjen e mostrës në nivel komune sipas vendbanimit dhe etnisë. Lejon aplikimin e filterëve demografikë dhe oversampling.",
         "pages/2_mostra_komunale.py",
         "images/municipality.png",
         "btn_kom"
@@ -157,7 +157,7 @@ with col2:
 with col3:
     menu_column(
         "Mostra për biznese",
-        "Krijoni ndarjen e mostrës për studime të bizneseve.",
+        "Gjeneroni ndarjen e mostrës së bizneseve sipas komunës/regjionit dhe aktivitetit (NACE). Lejon aplikimin e filterëve të profilit të bizneseve dhe oversampling",
         "pages/3_mostra_biznese.py",
         "images/business.png",
         "btn_biz"
