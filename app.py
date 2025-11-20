@@ -2,7 +2,7 @@ import streamlit as st
 
 st.set_page_config(
     page_title="Dizajnimi i mostrës",
-    page_icon="📊",
+    page_icon="images/page-icon.png",
     layout="wide"
 )
 
@@ -13,7 +13,7 @@ st.markdown("""
 <style>
 
 .logo svg {
-    width: 120px;
+    width: 100px;
     height: auto;
 }
 
@@ -44,7 +44,7 @@ st.markdown("""
 /* Center each column content */
 .col-container {
     text-align: center;
-    padding: 10px;
+    padding: 20px;
 }
 
 /* Image styling */
@@ -157,7 +157,7 @@ with col2:
 with col3:
     menu_column(
         "Mostra për biznese",
-        "Gjeneroni ndarjen e mostrës së bizneseve sipas komunës/regjionit dhe aktivitetit (NACE). Lejon aplikimin e filterëve të profilit të bizneseve dhe oversampling",
+        "Gjeneroni ndarjen e mostrës së bizneseve sipas komunës/regjionit dhe aktivitetit (NACE). Lejon aplikimin e filterëve të profilit të bizneseve dhe oversampling.",
         "pages/3_mostra_biznese.py",
         "images/business.png",
         "btn_biz"
