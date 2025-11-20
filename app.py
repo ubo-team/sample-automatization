@@ -126,7 +126,7 @@ def menu_column(title, description, page, image_path, key):
 # =====================================================
 
 # Logo
-with open("images/UBO logo.svg", "r", encoding="utf-8") as f:
+with open("images/UBO Logo.svg", "r", encoding="utf-8") as f:
     svg_logo = f.read()
 st.markdown(f"<div class='logo' style='text-align:left'>{svg_logo}</div>", unsafe_allow_html=True)
 
