@@ -6,23 +6,14 @@ st.set_page_config(
     layout="wide"
 )
 
-def load_svg(path):
-    with open(path, "r", encoding="utf-8") as f:
-        return f.read()
-
 # =====================================================
-# CUSTOM CSS
+# CSS
 # =====================================================
 st.markdown("""
 <style>
-            
+
 .logo svg {
     width: 120px;
-    height: auto;
-}
-            
-.icon svg {
-    width: 60px;
     height: auto;
 }
 
@@ -30,96 +21,144 @@ st.markdown("""
     font-size: 44px;
     font-weight: 700;
     margin-top: 20px;
-    margin-bottom: 30px;
-}     
+    margin-bottom: 40px;
+    text-align: center;
+    position: absolute;
+    left: 50%;
+    top: 0;
+    transform: translate(-50%, -125%);
+}
 
+.stHorizontalBlock {
+    gap: 1.5rem !important;
+}
+            
+.stVerticalBlock {
+    align-items: center;
+}
+            
+.stVerticalBlock > div:nth-child(2) {
+    width: 100% !important
+}
+
+/* Center each column content */
+.col-container {
+    text-align: center;
+    padding: 10px;
+}
+
+/* Image styling */
+.col-image img {
+    width: 140px;
+    height: auto;
+    margin-bottom: 15px;
+}
+
+/* Title */
+.col-title {
+    font-size: 26px;
+    font-weight: 700;
+    margin-bottom: 10px;
+    text-align: center;
+}
+
+/* Description */
+.col-text {
+    font-size: 16px;
+    color: #555;
+    margin-bottom: 20px;
+    text-align: center;
+}
+
+/* Buttons */
 .stButton > button {
-    width: 500px !important;
-    display: flex !important;
-    justify-content: space-between !important;
-    align-items: center !important;
-
-    border-radius: 14px !important;
-    border: 1px solid #e3e6eb !important;
-    background-color: #ffffff !important;
-
-    font-size: 20px !important;
+    padding: 10px 18px !important;
+    font-size: 16px !important;
     font-weight: 600 !important;
-    color: #333333 !important;
-
-    padding: 18px 22px !important;
-    text-align: left !important;
-
-    transition: all 0.25s ease !important;
-}
-
- /* ===== BUTTON HOVER ===== */
-.stButton > button:hover {
-    background-color: #eef4ff !important;
-    border-color: #4c8bf5 !important;
+    border-radius: 10px !important;
+    border: 2px solid #1a73e8 !important;
     color: #1a73e8 !important;
-    box-shadow: 0px 4px 10px rgba(76,139,245,0.12) !important;
+    background: #fff !important;
+    transition: 0.25s ease !important;
 }
 
-/* Hide ENTIRE sidebar */
+.stButton > button:hover {
+    background: #1a73e8 !important;
+    color: white !important;
+}
+
+/* Remove sidebar */
 section[data-testid="stSidebar"] {
     display: none !important;
 }
 
-/* Expand main content to full width */
 div[data-testid="stAppViewContainer"] > .main {
     margin-left: 0 !important;
-    padding-left: 0 !important;
-    padding-right: 0 !important;
 }
 
 </style>
 """, unsafe_allow_html=True)
 
 # =====================================================
-# CUSTOM HTML BUTTON
-# Uses JS → query param → switch_page
+# COLUMN COMPONENT WITHOUT CARDS
 # =====================================================
-icon_1 = load_svg("images/nation.svg")
-icon_2 = load_svg("images/municipality.svg")
-icon_3 = load_svg("images/business.svg")
+def menu_column(title, description, page, image_path, key):
+    st.markdown("<div class='col-container'>", unsafe_allow_html=True)
 
-
-def modern_button(label, page, icon):
-    if st.button(f"{icon}{label}"):
-        st.switch_page(page)
-
-def modern_button(label, page, icon):
-
-    icon_col, btn_col = st.columns([0.12, 0.88])
-
-    with icon_col:
-        st.markdown(f"<div class='icon'>{icon}</div>", unsafe_allow_html=True)
-
-    with btn_col:
-        if st.button(label):
-            st.switch_page(page)
-
-
-# =====================================================
-# LAYOUT
-# =====================================================
-left, right = st.columns([1.5, 1])
-
-with left:
-
-    # Logo
-    with open("images/UBO logo.svg", "r", encoding="utf-8") as f:
-        svg_logo = f.read()
-    st.markdown(f"<div class='logo'>{svg_logo}</div>", unsafe_allow_html=True)
+    # Image
+    st.image(image_path, use_container_width=True)
 
     # Title
-    st.markdown("<div class='title'>Dizajnimi i mostrës</div>", unsafe_allow_html=True)
+    st.markdown(f"<div class='col-title'>{title}</div>", unsafe_allow_html=True)
 
-    # Buttons (fully styled)
-    modern_button("Mostra nacionale", "pages/national-sample.py", icon_1)
-    modern_button("Mostra komunale", "pages/2_mostra_komunale.py", icon_2)
-    modern_button("Mostra për biznese", "pages/3_mostra_biznese.py", icon_3)
+    # Description
+    st.markdown(f"<div class='col-text'>{description}</div>", unsafe_allow_html=True)
 
-with right:
-    st.image("images/home.png", use_container_width=True)
+    # Button
+    if st.button(title, key=key):
+        st.switch_page(page)
+
+    st.markdown("</div>", unsafe_allow_html=True)
+
+
+# =====================================================
+# PAGE LAYOUT
+# =====================================================
+
+# Logo
+with open("images/UBO logo.svg", "r", encoding="utf-8") as f:
+    svg_logo = f.read()
+st.markdown(f"<div class='logo' style='text-align:left'>{svg_logo}</div>", unsafe_allow_html=True)
+
+# Title
+st.markdown("<div class='title'>Dizajnimi i mostrës</div>", unsafe_allow_html=True)
+
+# 3 Columns
+col1, col2, col3 = st.columns(3)
+
+with col1:
+    menu_column(
+        "Mostra nacionale",
+        "Gjeneroni ndarjen e mostrës në nivel nacional.",
+        "pages/national-sample.py",
+        "images/nation.png",
+        "btn_nat"
+    )
+
+with col2:
+    menu_column(
+        "Mostra komunale",
+        "Dizajnoni mostrën sipas komunave të përzgjedhura.",
+        "pages/2_mostra_komunale.py",
+        "images/municipality.png",
+        "btn_kom"
+    )
+
+with col3:
+    menu_column(
+        "Mostra për biznese",
+        "Krijoni ndarjen e mostrës për studime të bizneseve.",
+        "pages/3_mostra_biznese.py",
+        "images/business.png",
+        "btn_biz"
+    )
