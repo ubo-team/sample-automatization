@@ -2,6 +2,9 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import re
+from docx import Document
+from io import BytesIO
+import base64
 
 st.markdown("""
     <div style='width: 100%; padding: 20px 30px; background: #ffffff;
@@ -46,6 +49,56 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
+
+narrative_template_common = """
+Sample Design and Sampling Frame  
+This study used a probability-based, stratified sampling design drawn from the {country} official census frame.  
+The target population consists of residents aged 18 and over across all regions and municipalities.  
+The census served as the sampling frame, providing household and population counts by region, municipality, urban/rural area, and ethnicity.  
+
+Stratification and Allocation  
+Strata were defined by {list_strata}.  
+Each stratum received an allocation proportional to its population size using probability proportional to size (PPS).  
+Where relevant, oversampling was applied to: {oversampled_segments}.  
+Final sample sizes were adjusted through controlled rounding to maintain the overall target of {n_total} interviews while minimizing rounding bias.  
+"""
+
+narrative_template_capi = """
+Primary Sampling Units (PSUs) – CAPI  
+Primary sampling units were villages and neighbourhoods identified in the census frame.  
+Within each stratum, PSUs were selected using PPS without replacement.  
+A total of {num_psus_selected} PSUs were selected nationwide, each with {interviews_per_psu} interviews.  
+
+Within-PSU & Respondent Selection  
+Inside each selected PSU, households were selected systematically using a fixed skip interval (k) derived from dwelling counts.  
+Interviewers visited every k-th household and made up to three callbacks.  
+Within each household, the respondent was selected using the {respondent_selection_method} technique.  
+No substitutions were permitted.  
+"""
+
+narrative_template_cati = """
+CATI Design  
+The same stratification and allocation principles were applied to draw respondents from a probability-aligned telephone sampling frame.  
+Each stratum contributed the same proportion of interviews as defined in the national sample design.  
+No PSU stage was applied; individuals were selected directly within each stratum.  
+
+CATI Procedures  
+Callers attempted each sampled number up to three times at different times of day.  
+Non-answering numbers were retired only after three failed attempts.  
+Respondents were screened for eligibility (aged 18+).  
+"""
+
+narrative_template_cawi = """
+CAWI Design  
+The same stratification and allocation principles were applied to draw respondents from an online panel aligned to census strata.  
+Each stratum contributed the same proportion of interviews as defined in the sample design.  
+No PSU stage was applied; individuals were selected directly within each stratum.  
+
+CAWI Procedures  
+Panel members received email invitations and reminders.  
+Only eligible adults aged 18+ were allowed to complete the survey.  
+Duplicate or suspicious responses were removed by automated quality controls.  
+"""
 
 # =========================
 # CONFIG
@@ -965,6 +1018,16 @@ def compute_filtered_pop_for_psu_row(
 
     return total_pop
 
+def narrative_to_word(text: str) -> bytes:    
+    doc = Document()
+    for line in text.split("\n"):
+        doc.add_paragraph(line)
+    
+    buffer = BytesIO()
+    doc.save(buffer)
+    return buffer.getvalue()
+
+
 # Load data
 try:
     df_eth = load_ethnicity_settlement_data("excel-files/ASK-2024-Komuna-Etnia-Vendbanimi.xlsx")
@@ -1731,6 +1794,57 @@ if run_button:
                     filename="psu_capi_tegjitha_komunat.xlsx",
                     label="Shkarko PSU-të"
                 )
+
+    # COMMON SECTION (always included)
+    if not oversample_enabled:
+        oversample_vars = None
+
+    strata_list = [primary_level] + sub_options
+    narrative_text = narrative_template_common.format(
+        country="Kosovo",
+        list_strata=strata_list,
+        oversampled_segments=oversample_vars,
+        n_total=n_total
+    )
+
+    # METHOD-SPECIFIC SECTION
+    if data_collection_method == "CAPI":
+        narrative_text += narrative_template_capi.format(
+            num_psus_selected=interviews_per_psu,
+            interviews_per_psu=interviews_per_psu,
+            respondent_selection_method=data_collection_method
+        )
+
+    elif data_collection_method == "CATI":
+        narrative_text += narrative_template_cati
+
+    elif data_collection_method == "CAWI":
+        narrative_text += narrative_template_cawi
+
+    with st.expander("📄 Shfaq narrativën automatike të mostrës"):
+        st.markdown(narrative_text)
+
+    
+    narrative_doc = narrative_to_word(narrative_text)
+
+    b64 = base64.b64encode(narrative_doc).decode()
+
+    st.markdown(f"""
+        <a href="data:application/octet-stream;base64,{b64}" download="Survey_Narrative.docx">
+            <div style="
+                background-color:#344b77;
+                color:white;
+                text-align:center;
+                font-weight:500;
+                font-size:16px;
+                padding:10px;
+                border-radius:8px;
+                margin-top:10px;
+                cursor:pointer;">
+                📄 Shkarko Narrativën (Word)
+            </div>
+        </a>
+    """, unsafe_allow_html=True)
 
 else:
     st.info("Cakto parametrat kryesorë dhe kliko **'Gjenero shpërndarjen e mostrës'** për të dizajnuar mostrën.")
