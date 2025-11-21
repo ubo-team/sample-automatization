@@ -673,16 +673,6 @@ def select_psus_for_municipality(
 
     for eth in required_ethnicities:
         if has_eth(selected, eth):
-            print("\n======= DEBUG SELECTED =======")
-            print("ETH:", eth)
-            print(selected.head())
-            print(selected.dtypes)
-            print("Columns:", selected.columns.tolist())
-            print("Shqiptar_pop exists:", "Shqiptar_pop" in selected.columns)
-            print("Serb_pop exists:", "Serb_pop" in selected.columns)
-            print("Tjeter_pop exists:", "Tjeter_pop" in selected.columns)
-            print("================================\n")
-
             continue
 
         # gjej PSU jashtë të zgjedhurave që ka këtë etni
