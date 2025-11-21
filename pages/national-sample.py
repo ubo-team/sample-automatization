@@ -1,6 +1,7 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
+import re
 
 st.markdown("""
     <div style='width: 100%; padding: 20px 30px; background: #ffffff;
@@ -574,21 +575,49 @@ def select_psus_for_municipality(
     if num_psu == 0:
         return pd.DataFrame()
 
-    # Shtojmë kolona për prezencën e etnive
-    if "Shqiptar_pop" not in df.columns:
-        df["Shqiptar_pop"] = df["Shqiptar"]
-    if "Serb_pop" not in df.columns:
-        df["Serb_pop"] = df["Serb"]
-    if "Tjeter_pop" not in df.columns:
-        # supozojmë që df_psu e ka llogaritur tashmë Tjeter_pop
-        pass
-
     df["PopFilt"] = df.apply(
-    lambda r: compute_filtered_pop_for_psu(
-        r, df_eth, df_ga, age_cols,
-        gender_selected, min_age, max_age, eth_filter
+    lambda r: compute_filtered_pop_for_psu_row(
+        r,
+        age_min=min_age,
+        age_max=max_age,
+        gender_selected=gender_selected,
+        eth_filter=eth_filter
     ),
     axis=1)
+
+    ALL_ETH_COLS = [
+        "Shqiptar", "Serb", "Boshnjak", "Turk", "Rom",
+        "Ashkali", "Egjiptian", "Goran", "Të tjerë",
+        "Preferoj të mos përgjigjem"
+    ]
+
+    OTHER_ETH_COLS = [e for e in ALL_ETH_COLS if e not in ["Shqiptar", "Serb"]]
+
+    def compute_ethnic_pop_filtered(row):
+        eth_total = sum(row.get(c, 0) for c in ALL_ETH_COLS)
+        if eth_total <= 0:
+            return pd.Series({
+                "Shqiptar_pop": 0.0,
+                "Serb_pop": 0.0,
+                "Tjeter_pop": 0.0
+            })
+
+        shq = row.get("Shqiptar", 0) / eth_total
+        ser = row.get("Serb", 0) / eth_total
+        tjr = sum(row.get(c, 0) for c in OTHER_ETH_COLS) / eth_total
+
+        return pd.Series({
+            "Shqiptar_pop": row["PopFilt"] * shq,
+            "Serb_pop":     row["PopFilt"] * ser,
+            "Tjeter_pop":   row["PopFilt"] * tjr
+        })
+
+    # Remove any previous duplicate Tjeter_pop column
+    if "Tjeter_pop" in df.columns:
+        df = df.drop(columns=["Tjeter_pop"])
+
+    eth_cols_df = df.apply(compute_ethnic_pop_filtered, axis=1)
+    df = pd.concat([df, eth_cols_df], axis=1)
 
     # --------------------------
     # 1) Përfaqësimi i quadrant-eve
@@ -644,6 +673,16 @@ def select_psus_for_municipality(
 
     for eth in required_ethnicities:
         if has_eth(selected, eth):
+            print("\n======= DEBUG SELECTED =======")
+            print("ETH:", eth)
+            print(selected.head())
+            print(selected.dtypes)
+            print("Columns:", selected.columns.tolist())
+            print("Shqiptar_pop exists:", "Shqiptar_pop" in selected.columns)
+            print("Serb_pop exists:", "Serb_pop" in selected.columns)
+            print("Tjeter_pop exists:", "Tjeter_pop" in selected.columns)
+            print("================================\n")
+
             continue
 
         # gjej PSU jashtë të zgjedhurave që ka këtë etni
@@ -784,10 +823,14 @@ def compute_psu_table_for_all_municipalities(
                 best_urban = df_mun_urban.iloc[0].copy()
 
                 # Compute PopFilt for Urban row
-                best_urban["PopFilt"] = compute_filtered_pop_for_psu(
-                    best_urban, df_eth, df_ga, age_cols,
-                    gender_selected, min_age, max_age, eth_filter
+                best_urban["PopFilt"] = compute_filtered_pop_for_psu_row(
+                    best_urban,
+                    age_min=min_age,
+                    age_max=max_age,
+                    gender_selected=gender_selected,
+                    eth_filter=eth_filter
                 )
+
 
                 row_urban = pd.DataFrame([{
                     "Komuna": kom,
@@ -845,44 +888,92 @@ def extract_urban_interviews(pivot_row):
     urban_cols = [c for c in pivot_row.index if "Urban" in str(c)]
     return int(pivot_row[urban_cols].sum()) if urban_cols else 0
 
-def compute_filtered_pop_for_psu(psu_row, df_eth, df_ga, age_cols,
-                                 selected_genders, min_age, max_age, eth_filter):
+def compute_filtered_pop_for_psu_row(
+    psu_row: pd.Series,
+    age_min: int,
+    age_max: int | None,
+    gender_selected: list[str],
+    eth_filter: list[str]
+) -> float:
     """
-    Llogarit popullsinë e PSU-së bazuar në filtrat demografikë:
-    - Gjini
-    - Mosha (min_age → max_age)
-    - Etnia
+    Compute population for one PSU row using demographic filters applied directly to df_psu.
     """
 
-    kom = psu_row["Komuna"]
-    vendb = psu_row["Vendbanimi"]
-    fshati = psu_row["Fshati/Qyteti"]
+    total_pop = 0
 
-    # Filtro rreshtat që i përkasin pikërisht këtij PSU-je
-    df_sub = df_eth[
-        (df_eth["Komuna"] == kom) &
-        (df_eth["Vendbanimi"] == vendb) &
-        (df_eth["Etnia"].isin(eth_filter))
-    ].copy()
+    # 1. Handle age max
+    if age_max is None:
+        age_max = 120  # big number so it includes everything
 
+    # 2. Identify all age group columns (e.g. "0-4", "5-9", ...)
+    age_cols = []
+    for col in psu_row.index:
+        name = str(col).strip()
+        if re.fullmatch(r"\d+\-\d+", name) or re.fullmatch(r"\d+\+", name):
+            age_cols.append(col)
 
-    if df_sub.empty:
-        return 0
+    def group_range(col_name):
+        if "+" in col_name:
+            base = int(col_name.replace("+", "").strip())
+            return (base, 200)
+        else:
+            a, b = col_name.split("-")
+            return (int(a), int(b))
 
-    # Gjej koeficientët e moshës + gjinisë nga df_ga (si te pivot-i)
-    coef_by_kom = compute_gender_age_coefficients(
-        df_ga=df_ga,
-        age_cols=age_cols,
-        selected_genders=selected_genders,
-        min_age=min_age,
-        max_age=max_age
-    )
+    # 3. Loop through age groups
+    for col in age_cols:
+        lo, hi = group_range(col)
+        group_pop = psu_row[col]
 
-    # Apliko koeficientët
-    df_sub["coef"] = df_sub["Komuna"].map(coef_by_kom).fillna(0)
-    df_sub["Pop_adj"] = df_sub["Pop_base"] * df_sub["coef"]
+        # skip if no population
+        if group_pop <= 0:
+            continue
 
-    return df_sub["Pop_adj"].sum()
+        # calculate overlap between group [lo,hi] and filter [age_min,age_max]
+        overlap_lo = max(lo, age_min)
+        overlap_hi = min(hi, age_max)
+
+        if overlap_lo > overlap_hi:
+            # no overlap
+            continue
+
+        # fraction of the group included
+        group_size = hi - lo + 1
+        overlap_size = overlap_hi - overlap_lo + 1
+        fraction = overlap_size / group_size
+
+        total_pop += group_pop * fraction
+
+    # 4. Gender filter
+    if gender_selected == ["Meshkuj"]:
+        gender_factor = psu_row["Meshkuj"] / (psu_row["Meshkuj"] + psu_row["Femra"])
+        total_pop *= gender_factor
+
+    elif gender_selected == ["Femra"]:
+        gender_factor = psu_row["Femra"] / (psu_row["Meshkuj"] + psu_row["Femra"])
+        total_pop *= gender_factor
+
+    # If both genders selected → keep full total_pop
+
+    # 5. Ethnicity filter
+    eth_pop = 0
+    for eth in eth_filter:
+        if eth in psu_row:
+            eth_pop += psu_row[eth]
+
+    # denominator = total population in PSU (sum of all ethnic groups)
+    all_ethnic_cols = [
+        "Shqiptar", "Serb", "Boshnjak", "Turk", "Rom",
+        "Ashkali", "Egjiptian", "Goran", "Të tjerë",
+        "Preferoj të mos përgjigjem"
+    ]
+
+    eth_total = sum(psu_row.get(e, 0) for e in all_ethnic_cols)
+
+    if eth_total > 0:
+        total_pop *= (eth_pop / eth_total)
+
+    return total_pop
 
 # Load data
 try:
@@ -1648,7 +1739,7 @@ if run_button:
                 create_download_link2(
                     file_bytes=psu_excel,
                     filename="psu_capi_tegjitha_komunat.xlsx",
-                    label="Shkarko PSU-të (CAPI)"
+                    label="Shkarko PSU-të"
                 )
 
 else:
