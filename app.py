@@ -94,7 +94,7 @@ section[data-testid="stSidebar"] {
 
 div[data-testid="stAppViewContainer"] > .main {
     margin-left: 0 !important;
-}
+}sa
 
 </style>
 """, unsafe_allow_html=True)

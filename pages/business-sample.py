@@ -5,7 +5,7 @@ st.markdown("""
                 border-bottom: 1px solid #e6e6e6; display: flex;
                 justify-content: space-between; align-items: center;'>
         <a href="/" style='font-size: 18px; font-weight: 600; color: #344b77;
-                text-decoration: none;'>← Home</a>
+                text-decoration: none;'>← Faqja kryesore</a>
     </div>
 """
             , unsafe_allow_html=True)

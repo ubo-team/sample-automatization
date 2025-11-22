@@ -1,13 +1,17 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
+import re
+from docx import Document
+from io import BytesIO
+import base64
 
 st.markdown("""
     <div style='width: 100%; padding: 20px 30px; background: #ffffff;
                 border-bottom: 1px solid #e6e6e6; display: flex;
                 justify-content: space-between; align-items: center;'>
         <a href="/" style='font-size: 18px; font-weight: 600; color: #344b77;
-                text-decoration: none;'>← Home</a>
+                text-decoration: none;'>← Faqja kryesore</a>
     </div>
 """
             , unsafe_allow_html=True)
@@ -45,6 +49,56 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
+
+narrative_template_common = """
+Sample Design and Sampling Frame  
+This study used a probability-based, stratified sampling design drawn from the {country} official census frame.  
+The target population consists of residents aged 18 and over across all regions and municipalities.  
+The census served as the sampling frame, providing household and population counts by region, municipality, urban/rural area, and ethnicity.  
+
+Stratification and Allocation  
+Strata were defined by {list_strata}.  
+Each stratum received an allocation proportional to its population size using probability proportional to size (PPS).  
+Where relevant, oversampling was applied to: {oversampled_segments}.  
+Final sample sizes were adjusted through controlled rounding to maintain the overall target of {n_total} interviews while minimizing rounding bias.  
+"""
+
+narrative_template_capi = """
+Primary Sampling Units (PSUs) – CAPI  
+Primary sampling units were villages and neighbourhoods identified in the census frame.  
+Within each stratum, PSUs were selected using PPS without replacement.  
+A total of {num_psus_selected} PSUs were selected nationwide, each with {interviews_per_psu} interviews.  
+
+Within-PSU & Respondent Selection  
+Inside each selected PSU, households were selected systematically using a fixed skip interval (k) derived from dwelling counts.  
+Interviewers visited every k-th household and made up to three callbacks.  
+Within each household, the respondent was selected using the {respondent_selection_method} technique.  
+No substitutions were permitted.  
+"""
+
+narrative_template_cati = """
+CATI Design  
+The same stratification and allocation principles were applied to draw respondents from a probability-aligned telephone sampling frame.  
+Each stratum contributed the same proportion of interviews as defined in the national sample design.  
+No PSU stage was applied; individuals were selected directly within each stratum.  
+
+CATI Procedures  
+Callers attempted each sampled number up to three times at different times of day.  
+Non-answering numbers were retired only after three failed attempts.  
+Respondents were screened for eligibility (aged 18+).  
+"""
+
+narrative_template_cawi = """
+CAWI Design  
+The same stratification and allocation principles were applied to draw respondents from an online panel aligned to census strata.  
+Each stratum contributed the same proportion of interviews as defined in the sample design.  
+No PSU stage was applied; individuals were selected directly within each stratum.  
+
+CAWI Procedures  
+Panel members received email invitations and reminders.  
+Only eligible adults aged 18+ were allowed to complete the survey.  
+Duplicate or suspicious responses were removed by automated quality controls.  
+"""
 
 # =========================
 # CONFIG
@@ -378,8 +432,6 @@ def fix_minimum_allocations(
     min_vb: int = 2        # not used for ethnicity removal now, only for settlement logic
 ) -> pd.DataFrame:
 
-    print("\n---- FIX START ----\n")
-
     pivot_fixed = pivot.copy()
     municipalities = list(pivot_fixed.index)
 
@@ -500,9 +552,481 @@ def fix_minimum_allocations(
     # Ribëj totalin e fundit
     pivot_fixed.loc["Total"] = pivot_fixed.sum(numeric_only=True)
 
-
-    print("\n---- FIX END ----\n")
     return pivot_fixed
+
+@st.cache_data
+def load_psu_data(path: str) -> pd.DataFrame:
+    df = pd.read_excel(path)
+    # Normalizim minimal
+    df["Komuna"] = df["Komuna"].astype(str).str.strip()
+    df["Vendbanimi"] = df["Vendbanimi"].astype(str).str.strip()
+    df["Fshati/Qyteti"] = df["Fshati/Qyteti"].astype(str).str.strip()
+    df["Quadrant"] = df["Quadrant"].astype(str).str.strip()
+
+    # Etnitë kryesore
+    for col in ["Shqiptar", "Serb"]:
+        if col not in df.columns:
+            df[col] = 0.0
+        df[col] = df[col].fillna(0).astype(float)
+
+    other_cols = [
+        "Boshnjak", "Turk", "Rom", "Ashkali", "Egjiptian",
+        "Goran", "Të tjerë", "Preferoj të mos përgjigjem"
+    ]
+    for col in other_cols:
+        if col not in df.columns:
+            df[col] = 0.0
+        df[col] = df[col].fillna(0).astype(float)
+
+    df["Tjeter_pop"] = df[other_cols].sum(axis=1)
+
+    return df
+
+def compute_num_psu(total_interviews: int, k: int):
+    """
+    Rregulli yt:
+    - q = T // k, r = T % k
+    - nëse r == 0 → PSU të plota
+    - nëse r <= k/2 → nuk shtohet PSU, leftover = r (shpërndahet te PSU-të më të mëdha)
+    - nëse r > k/2 → shtohet një PSU shtesë me madhësi r
+    """
+    if total_interviews <= 0:
+        return 0, 0, 0
+
+    q = total_interviews // k
+    r = total_interviews % k
+    half_k = k / 2.0
+
+    if r == 0:
+        return q, 0, 0
+
+    if r <= half_k:
+        return q, r, 0
+    else:
+        return q + 1, 0, r
+
+
+def select_psus_for_municipality(
+    komuna: str,
+    total_interviews: int,
+    df_psu_mun: pd.DataFrame,
+    k: int,
+    required_ethnicities: list[str]
+) -> pd.DataFrame:
+    """
+    Zgjedh PSU-të për një komunë:
+    - garanton sa më shumë që të jetë e mundur përfaqësim të quadrant-eve
+    - tenton të ketë të paktën një PSU ku ekziston çdo etni e kërkuar
+    - shpërndan intervistat sipas rregullit të k/num_psu/leftover
+    """
+
+    df = df_psu_mun.copy()
+    if df.empty or total_interviews <= 0:
+        return pd.DataFrame()
+
+    num_psu, leftover, extra_psu_size = compute_num_psu(total_interviews, k)
+    if num_psu == 0:
+        return pd.DataFrame()
+
+    df["PopFilt"] = df.apply(
+    lambda r: compute_filtered_pop_for_psu_row(
+        r,
+        age_min=min_age,
+        age_max=max_age,
+        gender_selected=gender_selected,
+        eth_filter=eth_filter
+    ),
+    axis=1)
+
+    ALL_ETH_COLS = [
+        "Shqiptar", "Serb", "Boshnjak", "Turk", "Rom",
+        "Ashkali", "Egjiptian", "Goran", "Të tjerë",
+        "Preferoj të mos përgjigjem"
+    ]
+
+    OTHER_ETH_COLS = [e for e in ALL_ETH_COLS if e not in ["Shqiptar", "Serb"]]
+
+    def compute_ethnic_pop_filtered(row):
+        eth_total = sum(row.get(c, 0) for c in ALL_ETH_COLS)
+        if eth_total <= 0:
+            return pd.Series({
+                "Shqiptar_pop": 0.0,
+                "Serb_pop": 0.0,
+                "Tjeter_pop": 0.0
+            })
+
+        shq = row.get("Shqiptar", 0) / eth_total
+        ser = row.get("Serb", 0) / eth_total
+        tjr = sum(row.get(c, 0) for c in OTHER_ETH_COLS) / eth_total
+
+        return pd.Series({
+            "Shqiptar_pop": row["PopFilt"] * shq,
+            "Serb_pop":     row["PopFilt"] * ser,
+            "Tjeter_pop":   row["PopFilt"] * tjr
+        })
+
+    # Remove any previous duplicate Tjeter_pop column
+    if "Tjeter_pop" in df.columns:
+        df = df.drop(columns=["Tjeter_pop"])
+
+    eth_cols_df = df.apply(compute_ethnic_pop_filtered, axis=1)
+    df = pd.concat([df, eth_cols_df], axis=1)
+
+    # --------------------------
+    # 1) Përfaqësimi i quadrant-eve
+    # --------------------------
+    df = df.sort_values("PopFilt", ascending=False)
+    quads = df["Quadrant"].dropna().unique().tolist()
+
+    selected_idx = []
+
+    # a) nëse kemi mjaftueshëm PSU për të gjithë quadrant-et
+    if num_psu >= len(quads):
+        for q in quads:
+            cand = df[df["Quadrant"] == q]
+            if not cand.empty:
+                selected_idx.append(cand.index[0])
+
+        # plotëso numrin e PSU-ve me PSU-të më të mëdha të mbetura
+        remaining_needed = num_psu - len(selected_idx)
+        if remaining_needed > 0:
+            remaining = df.drop(index=selected_idx)
+            extra = remaining.head(remaining_needed).index.tolist()
+            selected_idx.extend(extra)
+    else:
+        # b) nuk kemi mjaftueshëm PSU për të gjithë quadrant-et → greedy
+        used_quads = set()
+        for i, row in df.iterrows():
+            q = row["Quadrant"]
+            if q not in used_quads:
+                selected_idx.append(i)
+                used_quads.add(q)
+                if len(selected_idx) == num_psu:
+                    break
+        # nëse akoma s'e kemi arritur numrin, plotëso me më të mëdhenjtë
+        if len(selected_idx) < num_psu:
+            remaining = df.drop(index=selected_idx)
+            extra = remaining.head(num_psu - len(selected_idx)).index.tolist()
+            selected_idx.extend(extra)
+
+    selected_idx = list(dict.fromkeys(selected_idx))  # heq duplikate duke ruajtur rendin
+    selected = df.loc[selected_idx].copy()
+
+    # --------------------------
+    # 2) Siguro prezencën e etnive të kërkuara
+    # --------------------------
+    def has_eth(selected_df, eth: str) -> bool:
+        if eth == "Shqiptar":
+            return (selected_df["Shqiptar_pop"] > 0).any()
+        if eth == "Serb":
+            return (selected_df["Serb_pop"] > 0).any()
+        if eth == "Tjerë":
+            return (selected_df["Tjeter_pop"] > 0).any()
+        return False
+
+    for eth in required_ethnicities:
+        if has_eth(selected, eth):
+            continue
+
+        # gjej PSU jashtë të zgjedhurave që ka këtë etni
+        if eth == "Shqiptar":
+            cand_eth = df[(df["Shqiptar_pop"] > 0) & (~df.index.isin(selected.index))]
+        elif eth == "Serb":
+            cand_eth = df[(df["Serb_pop"] > 0) & (~df.index.isin(selected.index))]
+        elif eth == "Tjerë":
+            cand_eth = df[(df["Tjeter_pop"] > 0) & (~df.index.isin(selected.index))]
+        else:
+            continue
+
+        if cand_eth.empty:
+            # nuk ka PSU me këtë etni në këtë komunë
+            continue
+
+        # marrim kandidatin më të madh
+        new_psu = cand_eth.iloc[0]
+
+        # gjej një PSU për t'u zëvendësuar që nuk është i vetmi në quadrant-in e vet
+        removed_idx = None
+        for idx, row in selected.sort_values("PopFilt", ascending=False).iterrows():
+            q = row["Quadrant"]
+            # a ka PSU të tjera në të njëjtin quadrant në 'selected'?
+            if (selected["Quadrant"] == q).sum() > 1:
+                removed_idx = idx
+                break
+
+        if removed_idx is None:
+            # nuk mund të bëjmë swap pa prishur quadrant-et → si fallback mund ta shtojmë
+            # por për të mos prishur logjikën e numrit të PSU-ve, aktualisht e anashkalojmë
+            continue
+
+        # bëjmë zëvendësimin
+        selected = selected.drop(index=removed_idx)
+        selected = pd.concat([selected, new_psu.to_frame().T])
+
+    # --------------------------
+    # 3) Shpërndarja e intervistave te PSU-të
+    # --------------------------
+    selected = selected.sort_values("PopFilt", ascending=False).reset_index(drop=True)
+
+    if extra_psu_size > 0:
+        # p.sh. 46 anketa, k=8 → 6 PSU (5*8 + 6)
+        base_sizes = [k] * (num_psu - 1) + [extra_psu_size]
+    else:
+        # p.sh. 42 anketa, k=8 → 5 PSU (5*8) + leftover=2 → shpërndajmë 2
+        base_sizes = [k] * num_psu
+        if leftover > 0:
+            for i in range(min(leftover, len(base_sizes))):
+                base_sizes[i] += 1
+
+    selected["Intervista"] = base_sizes[: len(selected)]
+
+    # shtojmë info etnish (num popullsie në atë PSU)
+    selected["Shqiptar_pop"] = selected["Shqiptar_pop"].astype(float)
+    selected["Serb_pop"] = selected["Serb_pop"].astype(float)
+    selected["Tjeter_pop"] = selected["Tjeter_pop"].astype(float)
+
+    selected["Komuna"] = komuna
+
+    return selected[
+        [
+            "Komuna",
+            "Fshati/Qyteti",
+            "Vendbanimi",
+            "Quadrant",
+            "PopFilt",
+            "Intervista",
+            "Shqiptar_pop",
+            "Serb_pop",
+            "Tjeter_pop",
+        ]
+    ]
+
+
+def compute_psu_table_for_all_municipalities(
+    pivot: pd.DataFrame,
+    df_psu: pd.DataFrame,
+    k: int,
+    eth_filter: list[str],
+    settlement_filter: list[str]
+) -> pd.DataFrame:
+    """
+    Gjeneron tabelën finale të PSU-ve për të gjitha komunat.
+    - Urban = 1 rresht me total Urban intervista
+    - Rural = përdor select_psus_for_municipality()
+    """
+
+    def extract_urban_interviews(pivot_row):
+        urban_cols = [c for c in pivot_row.index if "Urban" in str(c)]
+        return int(pivot_row[urban_cols].sum()) if urban_cols else 0
+
+    # Gjej kolonat e etnisë në pivot
+    eth_cols_map = {
+        eth: [
+            c for c in pivot.columns
+            if c != "Total" and str(c).startswith(eth)
+        ]
+        for eth in ["Shqiptar", "Serb", "Tjerë"]
+    }
+
+    all_rows = []
+
+    for kom in pivot.index:
+        if kom == "Total":
+            continue
+
+        # pikënisja
+        pivot_row = pivot.loc[kom]
+        total_interviews = int(pivot_row["Total"])
+        if total_interviews <= 0:
+            continue
+
+        # Llogarit Urban dhe Rural
+        urban_int = extract_urban_interviews(pivot_row)
+        rural_int = total_interviews - urban_int
+
+        df_mun = df_psu[df_psu["Komuna"] == kom].copy()
+        if df_mun.empty:
+            continue
+
+        # Filtrim sipas vendbanimit të zgjedhur (nëse e përdor në app)
+        if settlement_filter:
+            df_mun = df_mun[df_mun["Vendbanimi"].isin(settlement_filter)]
+
+        # ===========================
+        # 1) URBAN PSU (një rresht)
+        # ===========================
+        # ===========================
+        # 1) URBAN PSU (always single)
+        # ===========================
+        if urban_int > 0:
+            df_mun_urban = df_mun[df_mun["Vendbanimi"] == "Urban"]
+
+            if not df_mun_urban.empty:
+                # There is always exactly 1 Urban row per municipality
+                best_urban = df_mun_urban.iloc[0].copy()
+
+                # Compute PopFilt for Urban row
+                best_urban["PopFilt"] = compute_filtered_pop_for_psu_row(
+                    best_urban,
+                    age_min=min_age,
+                    age_max=max_age,
+                    gender_selected=gender_selected,
+                    eth_filter=eth_filter
+                )
+
+
+                row_urban = pd.DataFrame([{
+                    "Komuna": kom,
+                    "Fshati/Qyteti": best_urban["Fshati/Qyteti"],
+                    "Vendbanimi": "Urban",
+                    "Quadrant": "-",
+                    "PopFilt": best_urban["PopFilt"],
+                    "Intervista": urban_int,
+                    "Shqiptar_pop": best_urban.get("Shqiptar_pop", 0),
+                    "Serb_pop": best_urban.get("Serb_pop", 0),
+                    "Tjeter_pop": best_urban.get("Tjeter_pop", 0)
+                }])
+
+                all_rows.append(row_urban)
+
+
+        # ===========================
+        # 2) RURAL PSU (përdor logjikën e tanishme)
+        # ===========================
+
+        # Gjej cilat etni kanë mostra > 0 në këtë komunë
+        required_eth = []
+        for eth, cols in eth_cols_map.items():
+            if eth not in eth_filter:
+                continue
+            if not cols:
+                continue
+            if int(pivot.loc[kom, cols].sum()) > 0:
+                required_eth.append(eth)
+
+        if rural_int > 0:
+            df_mun_rural = df_mun[df_mun["Vendbanimi"] == "Rural"]
+
+            psu_rural = select_psus_for_municipality(
+                komuna=kom,
+                total_interviews=rural_int,
+                df_psu_mun=df_mun_rural,
+                k=k,
+                required_ethnicities=required_eth
+            )
+
+            if not psu_rural.empty:
+                all_rows.append(psu_rural)
+
+    # ===========================
+    # 3) Bashkimi final
+    # ===========================
+    if not all_rows:
+        return pd.DataFrame()
+
+    final_psu = pd.concat(all_rows, ignore_index=True)
+    return final_psu
+
+def extract_urban_interviews(pivot_row):
+    urban_cols = [c for c in pivot_row.index if "Urban" in str(c)]
+    return int(pivot_row[urban_cols].sum()) if urban_cols else 0
+
+def compute_filtered_pop_for_psu_row(
+    psu_row: pd.Series,
+    age_min: int,
+    age_max: int | None,
+    gender_selected: list[str],
+    eth_filter: list[str]
+) -> float:
+    """
+    Compute population for one PSU row using demographic filters applied directly to df_psu.
+    """
+
+    total_pop = 0
+
+    # 1. Handle age max
+    if age_max is None:
+        age_max = 120  # big number so it includes everything
+
+    # 2. Identify all age group columns (e.g. "0-4", "5-9", ...)
+    age_cols = []
+    for col in psu_row.index:
+        name = str(col).strip()
+        if re.fullmatch(r"\d+\-\d+", name) or re.fullmatch(r"\d+\+", name):
+            age_cols.append(col)
+
+    def group_range(col_name):
+        if "+" in col_name:
+            base = int(col_name.replace("+", "").strip())
+            return (base, 200)
+        else:
+            a, b = col_name.split("-")
+            return (int(a), int(b))
+
+    # 3. Loop through age groups
+    for col in age_cols:
+        lo, hi = group_range(col)
+        group_pop = psu_row[col]
+
+        # skip if no population
+        if group_pop <= 0:
+            continue
+
+        # calculate overlap between group [lo,hi] and filter [age_min,age_max]
+        overlap_lo = max(lo, age_min)
+        overlap_hi = min(hi, age_max)
+
+        if overlap_lo > overlap_hi:
+            # no overlap
+            continue
+
+        # fraction of the group included
+        group_size = hi - lo + 1
+        overlap_size = overlap_hi - overlap_lo + 1
+        fraction = overlap_size / group_size
+
+        total_pop += group_pop * fraction
+
+    # 4. Gender filter
+    if gender_selected == ["Meshkuj"]:
+        gender_factor = psu_row["Meshkuj"] / (psu_row["Meshkuj"] + psu_row["Femra"])
+        total_pop *= gender_factor
+
+    elif gender_selected == ["Femra"]:
+        gender_factor = psu_row["Femra"] / (psu_row["Meshkuj"] + psu_row["Femra"])
+        total_pop *= gender_factor
+
+    # If both genders selected → keep full total_pop
+
+    # 5. Ethnicity filter
+    eth_pop = 0
+    for eth in eth_filter:
+        if eth in psu_row:
+            eth_pop += psu_row[eth]
+
+    # denominator = total population in PSU (sum of all ethnic groups)
+    all_ethnic_cols = [
+        "Shqiptar", "Serb", "Boshnjak", "Turk", "Rom",
+        "Ashkali", "Egjiptian", "Goran", "Të tjerë",
+        "Preferoj të mos përgjigjem"
+    ]
+
+    eth_total = sum(psu_row.get(e, 0) for e in all_ethnic_cols)
+
+    if eth_total > 0:
+        total_pop *= (eth_pop / eth_total)
+
+    return total_pop
+
+def narrative_to_word(text: str) -> bytes:    
+    doc = Document()
+    for line in text.split("\n"):
+        doc.add_paragraph(line)
+    
+    buffer = BytesIO()
+    doc.save(buffer)
+    return buffer.getvalue()
+
 
 # Load data
 try:
@@ -514,6 +1038,12 @@ except Exception as e:
 
 region_map = get_region_mapping()
 
+try:
+    df_psu = load_psu_data("excel-files/ASK-2024-Komuna-Vendbanim-Fshat+Qytet.xlsx")
+except Exception as e:
+    st.error(f"Gabim gjatë leximit të fajllit të PSU-ve: {e}")
+    st.stop()
+
 # =========================
 # UI: SIDEBAR
 # =========================
@@ -524,7 +1054,7 @@ st.sidebar.header("Parametrat kryesorë")
 
 # Total sample size
 n_total = st.sidebar.number_input(
-    "Numri total i mostrës (n)",
+    "Numri total i mostrës (N)",
     min_value=1,
     value=1065,
     step=10
@@ -545,6 +1075,24 @@ sub_options = st.sidebar.multiselect(
 )
 
 st.sidebar.markdown("---")
+st.sidebar.subheader("Mbledhja e të dhënave")
+
+data_collection_method = st.sidebar.selectbox(
+    "Metoda e mbledhjes së të dhënave",
+    options=["CAPI", "CATI", "CAWI"],
+    index=0
+)
+
+if data_collection_method=="CAPI":
+    interviews_per_psu = st.sidebar.slider(
+        "Numri i intervistave për PSU",
+        min_value=6,
+        max_value=12,
+        value=8,
+        step=1
+    )
+
+st.sidebar.markdown("---")
 
 # Demographic filters
 st.sidebar.subheader("Filtrat demografikë")
@@ -557,7 +1105,7 @@ komuna_filter = st.sidebar.multiselect(
 )
 
 gender_selected = st.sidebar.multiselect(
-    "Gjinia për përfshirje në mostër",
+    "Gjinia që përfshihet",
     options=["Meshkuj", "Femra"],
     default=["Meshkuj", "Femra"]
 )
@@ -677,7 +1225,7 @@ if oversample_enabled:
         # ============================
         if allow_multiple:
             selected_values = st.sidebar.multiselect(
-                f"Zgjidh {var} për oversample (multiple allowed)",
+                f"Zgjidh {var} për oversample (Mund të zgjidhni më shumë se një)",
                 options=options,
                 key=f"multi_{var}"
             )
@@ -1083,15 +1631,21 @@ if run_button:
 
     # Përgatit tekstin për grupmoshën
     if max_age is None:
-        age_text = f"Grupmosha: {min_age}+"
+        age_text = f"Grupmosha: **{min_age}+**"
     else:
-        age_text = f"Grupmosha: {min_age}–{max_age}"
+        age_text = f"Grupmosha: **{min_age}–{max_age}**"
 
     # Përgatit tekstin për gjininë
     if len(gender_selected) == 1:
-        gender_text = f"Gjinia: {gender_selected[0]}"
+        gender_text = f"Gjinia: **{gender_selected[0]}**"
     else:
         gender_text = ""
+
+    if len(settlement_filter) == 1:
+        settlement_text = f"Vendbanimi: **{settlement_filter[0]}**"
+    else:
+        settlement_text = ""
+
 
     # Linja kryesore
     caption_main = (
@@ -1102,7 +1656,7 @@ if run_button:
     )
 
     # Linja shtesë për filtrat demografikë
-    caption_extra = " | ".join(filter(None, [age_text, gender_text]))
+    caption_extra = " | ".join(filter(None, [age_text, gender_text, settlement_text]))
 
     # Shfaq të dyja linjat
     st.caption(caption_main)
@@ -1181,6 +1735,7 @@ if run_button:
         """
         st.markdown(button_html, unsafe_allow_html=True)
 
+    
 
     # 📘 Pivot table (Excel)
     pivot_excel = df_to_excel_bytes(pivot, sheet_name="Mostra")
@@ -1205,6 +1760,91 @@ if run_button:
         filename="shpërndarja_fillestare.xlsx",
         label="Shkarko Shpërndarjen Fillestare"
     )
+
+        # =====================================================
+    # PSU-të vetëm nëse metoda është CAPI dhe niveli kryesor është Komunë
+    # =====================================================
+    if data_collection_method == "CAPI":
+        if primary_level != "Komunë":
+            st.info("Llogaritja e PSU-ve është e implementuar vetëm kur ndarja kryesore është sipas **Komunës**.")
+        else:
+            st.subheader("PSU-të e përzgjedhura")
+
+            with st.spinner("Duke llogaritur PSU-të..."):
+                psu_table = compute_psu_table_for_all_municipalities(
+                    pivot=pivot,
+                    df_psu=df_psu,
+                    k=interviews_per_psu,
+                    eth_filter=eth_filter,
+                    settlement_filter=settlement_filter,
+                )
+
+
+            if psu_table.empty:
+                st.warning("Nuk u gjeneruan PSU. Kontrollo filtrat, fajllin e PSU-ve dhe shpërndarjen e mostrës.")
+            else:
+                st.caption(
+                    f"PSU-të janë llogaritur me **{interviews_per_psu} intervista** për PSU sipas rregullit të përcaktuar."
+                )
+                st.dataframe(psu_table, use_container_width=True)
+
+                psu_excel = df_to_excel_bytes(psu_table, sheet_name="PSU")
+                create_download_link2(
+                    file_bytes=psu_excel,
+                    filename="psu_capi_tegjitha_komunat.xlsx",
+                    label="Shkarko PSU-të"
+                )
+
+    # COMMON SECTION (always included)
+    if not oversample_enabled:
+        oversample_vars = None
+
+    strata_list = [primary_level] + sub_options
+    narrative_text = narrative_template_common.format(
+        country="Kosovo",
+        list_strata=strata_list,
+        oversampled_segments=oversample_vars,
+        n_total=n_total
+    )
+
+    # METHOD-SPECIFIC SECTION
+    if data_collection_method == "CAPI":
+        narrative_text += narrative_template_capi.format(
+            num_psus_selected=interviews_per_psu,
+            interviews_per_psu=interviews_per_psu,
+            respondent_selection_method=data_collection_method
+        )
+
+    elif data_collection_method == "CATI":
+        narrative_text += narrative_template_cati
+
+    elif data_collection_method == "CAWI":
+        narrative_text += narrative_template_cawi
+
+    with st.expander("📄 Shfaq narrativën automatike të mostrës"):
+        st.markdown(narrative_text)
+
+    
+    narrative_doc = narrative_to_word(narrative_text)
+
+    b64 = base64.b64encode(narrative_doc).decode()
+
+    st.markdown(f"""
+        <a href="data:application/octet-stream;base64,{b64}" download="Survey_Narrative.docx">
+            <div style="
+                background-color:#344b77;
+                color:white;
+                text-align:center;
+                font-weight:500;
+                font-size:16px;
+                padding:10px;
+                border-radius:8px;
+                margin-top:10px;
+                cursor:pointer;">
+                📄 Shkarko Narrativën (Word)
+            </div>
+        </a>
+    """, unsafe_allow_html=True)
 
 else:
     st.info("Cakto parametrat kryesorë dhe kliko **'Gjenero shpërndarjen e mostrës'** për të dizajnuar mostrën.")
