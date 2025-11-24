@@ -171,41 +171,41 @@ def get_region_mapping() -> dict:
         "Deçan": "Gjakovë",
         "Dragash": "Prizren",
         "Ferizaj": "Ferizaj",
-        "Fushë Kosova": "Prishtinë",
+        "Fushë Kosovë": "Prishtinë",
         "Gjakovë": "Gjakovë",
         "Gjilan": "Gjilan",
         "Gllogoc": "Prishtinë",
         "Graçanicë": "Prishtinë",
-        "Hani I Elezit": "Ferizaj",
+        "Hani i Elezit": "Ferizaj",
         "Istog": "Pejë",
         "Junik": "Gjakovë",
         "Kaçanik": "Ferizaj",
         "Kamenicë": "Gjilan",
         "Klinë": "Pejë",
         "Kllokot": "Gjilan",
-        "Leposaviq": "Mitrovicë",
+        "Leposavic": "Mitrovicë",
         "Lipjan": "Prishtinë",
         "Malishevë": "Prizren",
         "Mamushë": "Prizren",
         "Mitrovicë": "Mitrovicë",
-        "Mitrovica Veriut": "Mitrovicë",
+        "Mitrovica Veriore": "Mitrovicë",
         "Novobërdë": "Gjilan",
         "Obiliq": "Prishtinë",
         "Partesh": "Gjilan",
-        "Peja": "Pejë",
-        "Podujeva": "Prishtinë",
-        "Prishtina": "Prishtinë",
+        "Pejë": "Pejë",
+        "Podujevë": "Prishtinë",
+        "Prishtinë": "Prishtinë",
         "Prizren": "Prizren",
         "Rahovec": "Gjakovë",
         "Ranillug": "Gjilan",
         "Shtërpcë": "Ferizaj",
         "Shtime": "Ferizaj",
-        "Skenderaj": "Mitrovicë",
+        "Skënderaj": "Mitrovicë",
         "Suharekë": "Prizren",
         "Viti": "Gjilan",
         "Vushtrri": "Mitrovicë",
         "Zubin Potok": "Mitrovicë",
-        "Zveçan": "Mitrovicë"
+        "Zvecan": "Mitrovicë"
     }
     return region_map
 
@@ -440,6 +440,64 @@ def fix_minimum_allocations(
 
     # store initial totals for receiver limit
     initial_total = pivot_fixed["Total"].copy()
+
+    has_ethnicity = any(
+    c.startswith(("Shqiptar", "Serb", "Tjerë"))
+    for c in pivot_fixed.columns)
+
+    if not has_ethnicity:
+
+        # ---------------
+        # Pjesa 1: gjej komunat me mungesë
+        # ---------------
+        deficits = {}  # {komuna: sa i mungon për me arrit 3}
+        for kom in municipalities:
+            current = pivot_fixed.at[kom, "Total"]
+            if current < min_total:
+                deficits[kom] = min_total - current
+
+        # Nëse s'ka komuna me deficite → kthe ashtu si është
+        if not deficits:
+            pivot_fixed.loc["Total"] = pivot_fixed.sum(numeric_only=True)
+            return pivot_fixed
+
+        # ---------------
+        # Pjesa 2: rialokim nga komuna të rajonit
+        # ---------------
+        for kom, missing in deficits.items():
+            reg = region_map.get(kom, None)
+
+            # Gjej kandidatë brenda rajonit
+            same_region = [
+                k for k in municipalities 
+                if k != kom and region_map.get(k,None) == reg
+            ]
+
+            # fallback në gjithë vendin nëse rajoni është bosh
+            if not same_region:
+                same_region = [k for k in municipalities if k != kom]
+
+            to_allocate = missing
+
+            # shko tek komunat e rajonit dhe mer 1 intervistë nga secila derisa të mbushësh deficitin
+            for donor in same_region:
+                if to_allocate == 0:
+                    break
+
+                donor_total = pivot_fixed.at[donor, "Total"]
+
+                if donor_total > min_total:  # vetëm nëse ka më shumë se minimumi
+                    pivot_fixed.at[donor, "Total"] -= 1
+                    pivot_fixed.at[kom, "Total"] += 1
+                    to_allocate -= 1
+
+        # ---------------
+        # Pjesa 3: Ribëj totalin e fundit
+        # ---------------
+        pivot_fixed.loc["Total"] = pivot_fixed.sum(numeric_only=True)
+
+        return pivot_fixed
+
 
     # identify ethnicity columns (Shqiptar, Serb, Tjeter)
     eth_cols = [c for c in pivot_fixed.columns if any(x in c for x in ["Shqiptar", "Serb", "Tjerë"])]
@@ -1338,6 +1396,9 @@ if run_button:
         df["Sub"] = df["Vendbanimi"].astype(str)
     else:
         df["Sub"] = "Total"
+    
+    if not sub_options:
+        df["Sub"] = df["Vendbanimi"].astype(str)
 
     grouped = (
         df.groupby([base_col, "Sub"], as_index=False)["Pop_adj"]
@@ -1616,13 +1677,18 @@ if run_button:
 
     pivot_old = pivot.copy()
     
+   
     pivot = fix_minimum_allocations(
             pivot=pivot,
             df_eth= df_eth,
             region_map=region_map,
             min_total=3,   # minimum anketa per komunë
             min_eth=3      # minimum per vendbanim (Urban/Rural)
-        )
+            )
+        
+    if not sub_options:
+        pivot = pivot.drop(columns=["Urban"])
+        pivot = pivot.drop(columns=["Rural"])
     
     # Safety: ensure global total matches n_total
     global_total = int(pivot.loc["Total", "Total"])
