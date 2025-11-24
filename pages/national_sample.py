@@ -850,12 +850,7 @@ def select_psus_for_municipality(
             "Komuna",
             "Fshati/Qyteti",
             "Vendbanimi",
-            "Quadrant",
-            "PopFilt",
-            "Intervista",
-            "Shqiptar_pop",
-            "Serb_pop",
-            "Tjeter_pop",
+            "Intervista"
         ]
     ]
 

@@ -140,7 +140,7 @@ with col1:
     menu_column(
         "Mostra nacionale",
         "Gjeneroni ndarjen e mostrës në nivel nacional sipas komunës/regjionit, etnisë dhe vendbanimit. Lejon aplikimin e filterëve demografikë dhe oversampling.",
-        "pages/national-sample.py",
+        "pages/national_sample.py",
         "images/nation.png",
         "btn_nat"
     )
@@ -149,7 +149,7 @@ with col2:
     menu_column(
         "Mostra komunale",
         "Gjeneroni ndarjen e mostrës në nivel komune sipas vendbanimit dhe etnisë. Lejon aplikimin e filterëve demografikë dhe oversampling.",
-        "pages/municipality-sample.py",
+        "pages/municipality_sample.py",
         "images/municipality.png",
         "btn_kom"
     )
@@ -158,7 +158,7 @@ with col3:
     menu_column(
         "Mostra për biznese",
         "Gjeneroni ndarjen e mostrës së bizneseve sipas komunës/regjionit dhe aktivitetit (NACE). Lejon aplikimin e filterëve të profilit të bizneseve dhe oversampling.",
-        "pages/business-sample.py",
+        "pages/business_sample.py",
         "images/business.png",
         "btn_biz"
     )
