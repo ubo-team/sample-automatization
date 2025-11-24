@@ -37,7 +37,7 @@ st.markdown("""
     align-items: center;
 }
             
-.stVerticalBlock > div:nth-child(2) {
+.stVerticalBlock > div:nth-child(2):has(button) {
     width: 80% !important
 }
 
