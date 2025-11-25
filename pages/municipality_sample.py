@@ -108,7 +108,7 @@ eth_filter = st.sidebar.multiselect(
 
 st.sidebar.markdown("---")
 
-run = st.sidebar.button("Gjenero shpërndarjen e mostrës")
+run = st.sidebar.button("Gjenero shpërndarjen e mostrës", key="generate_sample_button")
 
 # =====================================================
 # MAIN LOGIC
