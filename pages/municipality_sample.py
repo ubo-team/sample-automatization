@@ -4,7 +4,7 @@ import numpy as np
 from io import BytesIO
 import base64
 import re
-from pages.national_sample import (compute_filtered_pop_for_psu_row, controlled_rounding, load_psu_data)
+from pages.national_sample import (compute_filtered_pop_for_psu_row, controlled_rounding, load_psu_data, df_to_excel_bytes, create_download_link, create_download_link2)
 
 st.markdown("""
     <div style='width: 100%; padding: 20px 30px; background: #ffffff;
@@ -70,6 +70,8 @@ municipalities = sorted(df_psu["Komuna"].unique())
 # SIDEBAR UI
 # =====================================================
 
+st.sidebar.header("Parametrat kryesorë")
+
 komuna = st.sidebar.selectbox(
     "Zgjidh Komunën",
     options=municipalities,
@@ -79,7 +81,7 @@ komuna = st.sidebar.selectbox(
 N = st.sidebar.number_input(
     "Numri i mostrës për komunen",
     min_value=6,
-    value=60,
+    value=800,
     step=2
 )
 
@@ -98,15 +100,15 @@ max_age_input = st.sidebar.text_input("Mosha maksimale (opsionale)")
 max_age = int(max_age_input) if max_age_input.strip() else None
 
 eth_filter = st.sidebar.multiselect(
-    "Etnia",
-    ["Shqiptar", "Serb", "Boshnjak", "Turk", "Rom",
-     "Ashkali", "Egjiptian", "Goran", "Të tjerë"],
-    default=["Shqiptar"]
+    "Etnitë që përfshihen",
+    options=["Shqiptar", "Serb", "Tjerë"],
+    default=["Shqiptar", "Serb", "Tjerë"], 
+    key = "Etnia"
 )
 
 st.sidebar.markdown("---")
 
-run = st.sidebar.button("Gjenero mostra")
+run = st.sidebar.button("Gjenero shpërndarjen e mostrës")
 
 # =====================================================
 # MAIN LOGIC
@@ -117,6 +119,12 @@ if run:
 
     # Subset for municipality
     df_mun = df_psu[df_psu["Komuna"] == komuna].copy()
+
+    eth_other = ["Boshnjak", "Turk", "Rom", "Ashkali", "Egjiptian", "Goran", "Të tjerë"]
+    
+    if eth_filter == "Tjerë":
+        eth_filter.remove("Tjerë")
+        eth_filter.extend(eth_other)
 
     # Compute filtered population (PopFilt)
     df_mun["PopFilt"] = df_mun.apply(
@@ -161,6 +169,7 @@ if run:
     if not df_urban.empty:
         df_urban = df_urban.iloc[[0]].copy()   # always 1 urban
         df_urban["Intervista"] = urban_n
+        df_urban["Fshati/Qyteti"] = "Urban"
     else:
         df_urban["Intervista"] = 0
 
@@ -202,42 +211,58 @@ if run:
     # =====================================================
 
     final = pd.concat([df_urban, df_rural_final], ignore_index=True)
-    final = final[
+
+    sample = final[
+        ["Fshati/Qyteti","Intervista"]
+    ]
+
+    sample.loc["Total"] = [
+    "Total",                   # value for the first (string) column
+    sample["Intervista"].sum() # sum of the numeric column
+]
+
+    strata = final[
         ["Komuna", "Vendbanimi", "Fshati/Qyteti", "PopFilt", "Intervista"]
     ]
 
+    global_total = int(sample.loc["Total", "Intervista"])
+    # Përgatit tekstin për grupmoshën
+    if max_age is None:
+        age_text = f"{min_age}+"
+    else:
+        age_text = f"{min_age}–{max_age}"
+
+    caption_main = (
+        f"Totali i mostrës: **{N}** | "
+        f"Totali i alokuar: **{global_total}** | "
+        f"Grupmosha: **{age_text}**"
+    )
+
+    st.caption(caption_main)
+
     st.subheader("Tabela finale e mostrës brenda komunës")
-    st.dataframe(final, use_container_width=True)
+    st.dataframe(sample, use_container_width=True)
+
+    with st.expander("Shfaq tabelën e plotë të stratum-eve (long format)", expanded=False):
+        st.dataframe(strata, use_container_width=True)
 
     # =====================================================
     # 5) Download as Excel
     # =====================================================
+    # 📘 Pivot table (Excel)
+    pivot_excel = df_to_excel_bytes(sample, sheet_name="Mostra")
+    create_download_link(
+        file_bytes=pivot_excel,
+        filename=f"mostra_e_gjeneruar_{komuna}.xlsx",
+        label="Shkarko Mostrën"
+    )
 
-    def to_excel(df):
-        buffer = BytesIO()
-        with pd.ExcelWriter(buffer, engine="xlsxwriter") as writer:
-            df.to_excel(writer, index=False, sheet_name="MostraKomunës")
-        return buffer.getvalue()
-
-    excel_data = to_excel(final)
-    b64 = base64.b64encode(excel_data).decode()
-
-    st.markdown(f"""
-        <a href="data:application/octet-stream;base64,{b64}"
-           download="mostra_{komuna}.xlsx">
-            <div style="
-                background-color:#344b77;
-                color:white;
-                text-align:center;
-                font-weight:500;
-                font-size:16px;
-                padding:10px;
-                border-radius:8px;
-                margin-top:10px;
-                cursor:pointer;">
-                📘 Shkarko Mostrën për {komuna}
-            </div>
-        </a>
-    """, unsafe_allow_html=True)
+    # 📘 Strata table (Excel)
+    strata_excel = df_to_excel_bytes(strata, sheet_name="Strata")
+    create_download_link2(
+        file_bytes=strata_excel,
+        filename=f"mostra_strata_{komuna}.xlsx",
+        label="Shkarko Strata"
+    )
 else:
-    st.info("Cakto parametrat dhe kliko **Gjenero mostren**.")
+    st.info("Cakto parametrat kryesorë dhe kliko **'Gjenero shpërndarjen e mostrës'** për të dizajnuar mostrën..")

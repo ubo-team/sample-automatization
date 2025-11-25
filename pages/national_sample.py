@@ -1080,6 +1080,58 @@ def narrative_to_word(text: str) -> bytes:
     doc.save(buffer)
     return buffer.getvalue()
 
+def df_to_excel_bytes(df: pd.DataFrame, sheet_name: str = "Data") -> bytes:
+        from io import BytesIO
+        output = BytesIO()
+        with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
+            df.to_excel(writer, index=True, sheet_name=sheet_name)
+        return output.getvalue()
+
+def create_download_link(file_bytes: bytes, filename: str, label: str):
+    """Create full-width HTML download button (without rerun)."""
+    b64 = base64.b64encode(file_bytes).decode()
+    button_html = f"""<a href="data:application/octet-stream;base64,{b64}" download="{filename}" style="text-decoration:none;">
+                <div style="
+                    background-color:#344b77;
+                    color:white;
+                    text-align:center;
+                    font-weight:500;
+                    font-size:16px;
+                    padding:10px;
+                    border-radius:8px;
+                    margin-top:8px;
+                    width:100%;
+                    box-sizing:border-box;
+                    cursor:pointer;
+                ">
+                {label}
+                </div>
+            </a>
+        """
+    st.markdown(button_html, unsafe_allow_html=True)
+
+def create_download_link2(file_bytes: bytes, filename: str, label: str):
+    """Create full-width HTML download button (without rerun)."""
+    b64 = base64.b64encode(file_bytes).decode()
+    button_html = f"""<a href="data:application/octet-stream;base64,{b64}" download="{filename}" style="text-decoration:none;">
+                <div style="
+                    background-color:#5b8fb8;
+                    color:white;
+                    text-align:center;
+                    font-weight:500;
+                    font-size:16px;
+                    padding:10px;
+                    border-radius:8px;
+                    margin-top:8px;
+                    width:100%;
+                    box-sizing:border-box;
+                    cursor:pointer;
+                ">
+                {label}
+                </div>
+            </a>
+        """
+    st.markdown(button_html, unsafe_allow_html=True)
 
 # Load data
 try:
@@ -1737,66 +1789,6 @@ if run_button:
         display_cols = [base_col, "Sub", "Pop_stratum", "n_alloc"]
         st.dataframe(grouped[display_cols], use_container_width=True)
 
-    # 11) Download buttons (secila tabelë veç e veç në Excel)
-
-    def df_to_excel_bytes(df: pd.DataFrame, sheet_name: str = "Data") -> bytes:
-        from io import BytesIO
-        output = BytesIO()
-        with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
-            df.to_excel(writer, index=True, sheet_name=sheet_name)
-        return output.getvalue()
-
-    import base64
-
-    def create_download_link(file_bytes: bytes, filename: str, label: str):
-        """Create full-width HTML download button (without rerun)."""
-        b64 = base64.b64encode(file_bytes).decode()
-        button_html = f"""
-            <a href="data:application/octet-stream;base64,{b64}" download="{filename}" style="text-decoration:none;">
-                <div style="
-                    background-color:#344b77;
-                    color:white;
-                    text-align:center;
-                    font-weight:500;
-                    font-size:16px;
-                    padding:10px;
-                    border-radius:8px;
-                    margin-top:8px;
-                    width:100%;
-                    box-sizing:border-box;
-                    cursor:pointer;
-                ">
-                {label}
-                </div>
-            </a>
-        """
-        st.markdown(button_html, unsafe_allow_html=True)
-
-    def create_download_link2(file_bytes: bytes, filename: str, label: str):
-        """Create full-width HTML download button (without rerun)."""
-        b64 = base64.b64encode(file_bytes).decode()
-        button_html = f"""
-            <a href="data:application/octet-stream;base64,{b64}" download="{filename}" style="text-decoration:none;">
-                <div style="
-                    background-color:#5b8fb8;
-                    color:white;
-                    text-align:center;
-                    font-weight:500;
-                    font-size:16px;
-                    padding:10px;
-                    border-radius:8px;
-                    margin-top:8px;
-                    width:100%;
-                    box-sizing:border-box;
-                    cursor:pointer;
-                ">
-                {label}
-                </div>
-            </a>
-        """
-        st.markdown(button_html, unsafe_allow_html=True)
-
-    
 
     # 📘 Pivot table (Excel)
     pivot_excel = df_to_excel_bytes(pivot, sheet_name="Mostra")
