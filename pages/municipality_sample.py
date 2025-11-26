@@ -8,6 +8,9 @@ st.set_page_config(
     layout="wide"
 )
 
+import uuid
+st.write("RUN ID:", uuid.uuid4())
+
 import pandas as pd
 import numpy as np
 import pydeck as pdk
