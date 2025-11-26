@@ -1045,84 +1045,120 @@ def compute_filtered_pop_for_psu_row(
     eth_filter: list[str]
 ) -> float:
     """
-    Compute population for one PSU row using demographic filters applied directly to df_psu.
+    Compute population for one PSU using demographic filters.
+    Fully safe: no division by zero, respects gender/age/eth filters.
     """
 
-    total_pop = 0
+    import re
 
+    # -------------------------------------------------------
     # 1. Handle age max
+    # -------------------------------------------------------
     if age_max is None:
-        age_max = 120  # big number so it includes everything
+        age_max = 120  # large value = include all
 
-    # 2. Identify all age group columns (e.g. "0-4", "5-9", ...)
+    # -------------------------------------------------------
+    # 2. Identify all PSU age group columns
+    # -------------------------------------------------------
     age_cols = []
     for col in psu_row.index:
         name = str(col).strip()
+        # match formats like '0-4', '5-9', '65+', etc.
         if re.fullmatch(r"\d+\-\d+", name) or re.fullmatch(r"\d+\+", name):
             age_cols.append(col)
 
+    # Helper to decode age range
     def group_range(col_name):
         if "+" in col_name:
-            base = int(col_name.replace("+", "").strip())
+            base = int(col_name.replace("+", ""))
             return (base, 200)
-        else:
-            a, b = col_name.split("-")
-            return (int(a), int(b))
+        lo, hi = col_name.split("-")
+        return (int(lo), int(hi))
 
-    # 3. Loop through age groups
+    # -------------------------------------------------------
+    # 3. AGE FILTER (fractional overlap)
+    # -------------------------------------------------------
+    pop_age = 0
     for col in age_cols:
         lo, hi = group_range(col)
         group_pop = psu_row[col]
 
-        # skip if no population
         if group_pop <= 0:
             continue
 
-        # calculate overlap between group [lo,hi] and filter [age_min,age_max]
+        # overlap between age group and filter
         overlap_lo = max(lo, age_min)
         overlap_hi = min(hi, age_max)
 
         if overlap_lo > overlap_hi:
-            # no overlap
-            continue
+            continue  # no overlap
 
-        # fraction of the group included
         group_size = hi - lo + 1
         overlap_size = overlap_hi - overlap_lo + 1
+
         fraction = overlap_size / group_size
 
-        total_pop += group_pop * fraction
+        pop_age += group_pop * fraction
 
-    # 4. Gender filter
-    if gender_selected == ["Meshkuj"]:
-        gender_factor = psu_row["Meshkuj"] / (psu_row["Meshkuj"] + psu_row["Femra"])
-        total_pop *= gender_factor
+    # If no ages match → return 0
+    if pop_age <= 0:
+        return 0
 
-    elif gender_selected == ["Femra"]:
-        gender_factor = psu_row["Femra"] / (psu_row["Meshkuj"] + psu_row["Femra"])
-        total_pop *= gender_factor
+    # -------------------------------------------------------
+    # 4. GENDER FILTER (SAFE)
+    # -------------------------------------------------------
+    male = psu_row.get("Meshkuj", 0)
+    female = psu_row.get("Femra", 0)
 
-    # If both genders selected → keep full total_pop
+    if "Meshkuj" not in gender_selected:
+        male = 0
+    if "Femra" not in gender_selected:
+        female = 0
 
-    # 5. Ethnicity filter
-    eth_pop = 0
-    for eth in eth_filter:
-        if eth in psu_row:
-            eth_pop += psu_row[eth]
+    total_gender_pop = male + female
 
-    # denominator = total population in PSU (sum of all ethnic groups)
+    if total_gender_pop <= 0:
+        return 0
+
+    # Proportion from allowed genders
+    gender_fraction = total_gender_pop / (psu_row.get("Meshkuj", 0) + psu_row.get("Femra", 0)
+                                          if (psu_row.get("Meshkuj", 0) + psu_row.get("Femra", 0)) > 0
+                                          else total_gender_pop)
+
+    # -------------------------------------------------------
+    # 5. ETHNICITY FILTER (SAFE)
+    # -------------------------------------------------------
+    eth_total = 0
+    eth_selected = 0
+
     all_ethnic_cols = [
         "Shqiptar", "Serb", "Boshnjak", "Turk", "Rom",
         "Ashkali", "Egjiptian", "Goran", "Të tjerë",
         "Preferoj të mos përgjigjem"
     ]
 
-    eth_total = sum(psu_row.get(e, 0) for e in all_ethnic_cols)
+    for eth in all_ethnic_cols:
+        eth_total += psu_row.get(eth, 0)
 
+    for eth in eth_filter:
+        eth_selected += psu_row.get(eth, 0)
+
+    # SAFE division
     if eth_total > 0:
-        total_pop *= (eth_pop / eth_total)
+        eth_fraction = eth_selected / eth_total
+    else:
+        eth_fraction = 0
 
-    return total_pop
+    if eth_fraction <= 0:
+        return 0
+
+    # -------------------------------------------------------
+    # 6. Combine all three filters (age × gender × ethnicity)
+    # -------------------------------------------------------
+    final_pop = pop_age * (total_gender_pop / (male + female) if (male + female) > 0 else 1)
+    final_pop *= eth_fraction
+
+    return max(final_pop, 0)
 
 def narrative_to_word(text: str) -> bytes:    
     doc = Document()
@@ -1203,72 +1239,109 @@ def compute_population_coefficients(
     - Komunë
     - Regjion
     - Gjinia
-    - Grupmosha (CAWI → 55+)
+    - Grupmosha
     - Vendbanimi
     - Etnia
+    Vetëm nëse dimensioni ka ≥ 2 kategori me pop > 0.
     """
 
+    out = []
+
     # ---------------------------------------------------
-    # 1) Filtrim i df_eth (Etnia, Vendbanimi, Komuna)
+    # Prepare df_eth and df_ga based on filters
     # ---------------------------------------------------
     df_pop = df_eth.copy()
     df_pop = df_pop[df_pop["Etnia"].isin(eth_filter)]
     df_pop = df_pop[df_pop["Vendbanimi"].isin(settlement_filter)]
     df_pop = df_pop[df_pop["Komuna"].isin(komuna_filter)]
 
-    # Pop rreth tërësishme pas filtrave etnike & vendbanimit
-    total_pop_eth = df_pop["Pop_base"].sum()
-    if total_pop_eth == 0:
-        return None
+    if df_pop.empty:
+        return pd.DataFrame()
 
-    # ---------------------------------------------------
-    # 2) Filtrim i df_ga (Gjinia & Mosha)
-    # ---------------------------------------------------
+    # df_ga
     df_age = df_ga[df_ga["Komuna"].isin(komuna_filter)]
     df_age = df_age[df_age["Gjinia"].isin(gender_selected)]
 
-    # moshat numerike
+    if df_age.empty:
+        return pd.DataFrame()
+
+    # Age columns
     age_cols = [c for c in df_age.columns if str(c).isdigit()]
 
-    # define max_age sipas CAWI
+    # max_age automatic for CAWI
     if data_collection_method == "CAWI" and max_age is None:
         max_age = 120
 
     if max_age is None:
         max_age = max(map(int, age_cols))
 
-    # zbatimi i filtrit të moshës
+    # Filter age columns
     age_mask_cols = [c for c in age_cols if min_age <= int(c) <= max_age]
+
     df_age["Pop_age"] = df_age[age_mask_cols].sum(axis=1)
 
-    total_pop_age = df_age["Pop_age"].sum()
+    # ---------------------------------------------------
+    # Helper to add dimension blocks safely
+    # ---------------------------------------------------
+    def append_block(dim, pop_series):
+        """
+        Adds dimension only if ≥2 categories AND total pop > 0.
+        Removes categories with Pop=0 before checking.
+        """
+        # Remove categories with zero population
+        pop_series = pop_series[pop_series > 0]
+
+        if len(pop_series) < 2:
+            return  # ← SKIP dimension
+
+        total = pop_series.sum()
+        if total == 0:
+            return  # ← Prevent ZeroDivisionError
+
+        coef_series = pop_series / total
+
+        for cat, pop in pop_series.items():
+            out.append({
+                "Dimensioni": dim,
+                "Kategoria": cat,
+                "Populacioni": pop,
+                "Pesha": float(coef_series[cat])
+            })
 
     # ---------------------------------------------------
-    # 3) Koeficientët për çdo dimension
+    # 1) Komuna
     # ---------------------------------------------------
-
-    # KOMUNA
     pop_kom = df_pop.groupby("Komuna")["Pop_base"].sum()
-    coef_kom = pop_kom / pop_kom.sum()
+    append_block("Komuna", pop_kom)
 
-    # REGJION
+    # ---------------------------------------------------
+    # 2) Regjion
+    # ---------------------------------------------------
     df_pop["Regjion"] = df_pop["Komuna"].map(region_map)
     pop_reg = df_pop.groupby("Regjion")["Pop_base"].sum()
-    coef_reg = pop_reg / pop_reg.sum()
+    append_block("Regjion", pop_reg)
 
-    # ETNIA
+    # ---------------------------------------------------
+    # 3) Etnia
+    # ---------------------------------------------------
     pop_eth = df_pop.groupby("Etnia")["Pop_base"].sum()
-    coef_eth = pop_eth / pop_eth.sum()
+    append_block("Etnia", pop_eth)
 
-    # VENDBANIM
+    # ---------------------------------------------------
+    # 4) Vendbanimi
+    # ---------------------------------------------------
     pop_vb = df_pop.groupby("Vendbanimi")["Pop_base"].sum()
-    coef_vb = pop_vb / pop_vb.sum()
+    append_block("Vendbanimi", pop_vb)
 
-    # GJINIA
+    # ---------------------------------------------------
+    # 5) Gjinia
+    # ---------------------------------------------------
     pop_gender = df_age.groupby("Gjinia")["Pop_age"].sum()
-    coef_gender = pop_gender / pop_gender.sum()
+    append_block("Gjinia", pop_gender)
 
-    # GRUPMOSHA
+    # ---------------------------------------------------
+    # 6) Grupmoshat
+    # ---------------------------------------------------
     def map_age_group(a):
         a = int(a)
         if data_collection_method == "CAWI":
@@ -1284,36 +1357,18 @@ def compute_population_coefficients(
     long_age = []
     for _, row in df_age.iterrows():
         for c in age_mask_cols:
-            count = row[c]
-            group = map_age_group(int(c))
-            if group and count > 0:
-                long_age.append((group, count))
+            grp = map_age_group(int(c))
+            if grp:
+                long_age.append((grp, row[c]))
 
-    df_age_long = pd.DataFrame(long_age, columns=["Age_group","Count"])
-    pop_age_grp = df_age_long.groupby("Age_group")["Count"].sum()
-    coef_age = pop_age_grp / pop_age_grp.sum()
+    if long_age:
+        df_age_long = pd.DataFrame(long_age, columns=["Age_group","Count"])
+        pop_age_grp = df_age_long.groupby("Age_group")["Count"].sum()
+        append_block("Grupmosha", pop_age_grp)
 
     # ---------------------------------------------------
-    # Ndërto tabelën finale
+    # Return final result
     # ---------------------------------------------------
-    out = []
-
-    def append_block(dim, series_pop, series_coef):
-        for cat, pop in series_pop.items():
-            out.append({
-                "Dimensioni": dim,
-                "Kategoria": cat,
-                "Populacioni": pop,
-                "Pesha": float(series_coef[cat])
-            })
-
-    append_block("Komuna", pop_kom, coef_kom)
-    append_block("Regjion", pop_reg, coef_reg)
-    append_block("Etnia", pop_eth, coef_eth)
-    append_block("Vendbanimi", pop_vb, coef_vb)
-    append_block("Gjinia", pop_gender, coef_gender)
-    append_block("Grupmosha", pop_age_grp, coef_age)
-
     return pd.DataFrame(out)
 
 def add_codes_to_coef_df(coef_df, data_collection_method):
@@ -1468,7 +1523,8 @@ def generate_spss_syntax(coef_df, recode_d3_text, data_collection_method):
     out += "SPSSINC RAKE\n"
 
     # Dimension ordering
-    dim_order = ["Komuna", "Regjion", "Gjinia", "Grupmosha", "Vendbanimi", "Etnia"]
+    dim_order = list(coef_df["Dimensioni"].unique())
+
 
     dim_index = 1
 
@@ -2316,6 +2372,21 @@ if run_button:
     )
 
     coef_df = add_codes_to_coef_df(coef_df, data_collection_method)
+    # Remove dimensions with only 1 category
+    filtered_dims = (
+        coef_df.groupby("Dimensioni")["Kategoria"]
+        .nunique()
+    )
+
+    dims_to_keep = filtered_dims[filtered_dims > 1].index.tolist()
+
+    coef_df = coef_df[coef_df["Dimensioni"].isin(dims_to_keep)]
+
+    if coef_df.empty:
+        st.warning("Nuk ka asnjë dimension valid për peshim pas filtrave.")
+        st.stop()
+
+
 
     st.markdown("---")
     st.subheader("Sintaksa për peshim në SPSS")

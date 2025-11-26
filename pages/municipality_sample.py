@@ -3,7 +3,8 @@ import pandas as pd
 import numpy as np
 import pydeck as pdk
 
-from pages.national_sample import (compute_filtered_pop_for_psu_row, controlled_rounding, load_psu_data, df_to_excel_bytes, create_download_link, create_download_link2)
+from pages.national_sample import (compute_filtered_pop_for_psu_row, controlled_rounding, load_psu_data, df_to_excel_bytes, 
+                                   create_download_link, create_download_link2, compute_population_coefficients, add_codes_to_coef_df, df_eth, df_ga, region_map)
 
 st.markdown("""
     <div style='width: 100%; padding: 20px 30px; background: #ffffff;
@@ -48,6 +49,50 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
+def generate_spss_syntax_municipality(coef_df, data_collection_method):
+
+    out = "* Encoding: UTF-8.\n\n"
+
+    # RECODE për Grupmosha
+    if data_collection_method == "CAWI":
+        out += (
+            "RECODE D2 (MISSING=COPY) "
+            "(18 THRU 24 = 1) "
+            "(25 THRU 34 = 2) "
+            "(35 THRU 44 = 3) "
+            "(45 THRU 54 = 4) "
+            "(55 THRU HI = 5) "
+            "INTO Grupmoshat.\n"
+        )
+    else:
+        out += (
+            "RECODE D2 (MISSING=COPY) "
+            "(18 THRU 24 = 1) "
+            "(25 THRU 34 = 2) "
+            "(35 THRU 44 = 3) "
+            "(45 THRU 54 = 4) "
+            "(55 THRU 64 = 5) "
+            "(65 THRU HI = 6) "
+            "INTO Grupmoshat.\n"
+        )
+
+    out += "\nSPSSINC RAKE\n"
+
+    dim_order = ["Gjinia", "Grupmosha", "Vendbanimi", "Etnia"]
+
+    i = 1
+    for dim in dim_order:
+        df_dim = coef_df[coef_df["Dimensioni"] == dim]
+
+        out += f"DIM{i}={dim} "
+        for _, row in df_dim.iterrows():
+            out += f"{int(row['Kodi'])} {row['Pesha']}\n"
+        i += 1
+
+    out += "FINALWEIGHT=peshat.\n"
+
+    return out
+
 # =====================================================
 # PAGE SETTINGS & HEADER
 # =====================================================
@@ -82,6 +127,13 @@ N = st.sidebar.number_input(
     min_value=6,
     value=800,
     step=2
+)
+
+data_collection_method = st.sidebar.selectbox(
+    "Metoda e mbledhjes së të dhënave",
+    options=["CAPI", "CATI", "CAWI"],
+    index=0,
+    key="Metoda për komuna"
 )
 
 st.sidebar.markdown("---")
@@ -308,5 +360,55 @@ if run:
 
     st.pydeck_chart(deck)
     
+    coef_df = compute_population_coefficients(
+    df_ga=df_ga,
+    df_eth=df_eth,
+    region_map=region_map,
+    gender_selected=gender_selected,
+    min_age=min_age,
+    max_age=max_age,
+    eth_filter=eth_filter,
+    settlement_filter=["Urban","Rural"],  # brenda komunes
+    komuna_filter=[komuna],               # shumë e rëndësishme!
+    data_collection_method=add_codes_to_coef_df
+)
+
+    dims_to_keep = ["Gjinia", "Grupmosha", "Vendbanimi", "Etnia"]
+    coef_df = coef_df[coef_df["Dimensioni"].isin(dims_to_keep)]
+
+    # Remove dimensions with only one category
+    valid_dims = (
+        coef_df.groupby("Dimensioni")["Kategoria"]
+        .nunique()
+    )
+
+    dims_valid = valid_dims[valid_dims > 1].index.tolist()
+
+    coef_df = coef_df[coef_df["Dimensioni"].isin(dims_valid)]
+
+    coef_df = add_codes_to_coef_df(
+    coef_df,
+    data_collection_method
+)
+
+    spss_text = generate_spss_syntax_municipality(
+    coef_df,
+    data_collection_method
+)
+    st.markdown("---")
+    st.subheader("Sintaksa për peshim në SPSS")
+
+    with st.expander("Shfaq tabelën e plotë të peshave", expanded=False):
+        st.dataframe(coef_df, use_container_width=True)
+
+    create_download_link(
+        file_bytes=spss_text.encode("utf-8"),
+        filename=f"sintaksa_peshat_{komuna}.sps",
+        label="Shkarko Peshat për SPSS"
+    )
+
+
+
+
 else:
     st.info("Cakto parametrat kryesorë dhe kliko **'Gjenero shpërndarjen e mostrës'** për të dizajnuar mostrën.")
