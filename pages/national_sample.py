@@ -101,6 +101,51 @@ Only eligible adults aged 18+ were allowed to complete the survey.
 Duplicate or suspicious responses were removed by automated quality controls.  
 """
 
+RECODE_D3_TEMPLATE = r"""
+RECODE D3 (2=7)
+(3=4)
+(8=1)
+(4=5)
+(5=1)
+(6=7)
+(7=6)
+(9=1)
+(10=5)
+(11=3)
+(12=7)
+(13=5)
+(14=6)
+(15=3)
+(16=6)
+(17=2)
+(18=1)
+(19=4)
+(20=4)
+(21=2)
+(22=2)
+(23=1)
+(24=1)
+(25=6)
+(26=3)
+(27=1)
+(1=1)
+(28=4)
+(29=7)
+(30=6)
+(33=5)
+(34=5)
+(31=2)
+(32=4)
+(35=6)
+(36=2)
+(37=2)
+(38=2)
+ INTO Regjioni.
+VARIABLE LABELS  Regjioni 'Regjioni'.
+EXECUTE.
+"""
+
+
 # =========================
 # CONFIG
 # =========================
@@ -177,7 +222,7 @@ def get_region_mapping() -> dict:
         "Gjilan": "Gjilan",
         "Gllogoc": "Prishtinë",
         "Graçanicë": "Prishtinë",
-        "Hani i Elezit": "Ferizaj",
+        "Han i Elezit": "Ferizaj",
         "Istog": "Pejë",
         "Junik": "Gjakovë",
         "Kaçanik": "Ferizaj",
@@ -1141,6 +1186,311 @@ def create_download_link2(file_bytes: bytes, filename: str, label: str):
         """
     st.markdown(button_html, unsafe_allow_html=True)
 
+def compute_population_coefficients(
+    df_ga,
+    df_eth,
+    region_map,
+    gender_selected,
+    min_age,
+    max_age,
+    eth_filter,
+    settlement_filter,
+    komuna_filter,
+    data_collection_method
+):
+    """
+    Kthen koeficientët e popullsisë pas filtrave për:
+    - Komunë
+    - Regjion
+    - Gjinia
+    - Grupmosha (CAWI → 55+)
+    - Vendbanimi
+    - Etnia
+    """
+
+    # ---------------------------------------------------
+    # 1) Filtrim i df_eth (Etnia, Vendbanimi, Komuna)
+    # ---------------------------------------------------
+    df_pop = df_eth.copy()
+    df_pop = df_pop[df_pop["Etnia"].isin(eth_filter)]
+    df_pop = df_pop[df_pop["Vendbanimi"].isin(settlement_filter)]
+    df_pop = df_pop[df_pop["Komuna"].isin(komuna_filter)]
+
+    # Pop rreth tërësishme pas filtrave etnike & vendbanimit
+    total_pop_eth = df_pop["Pop_base"].sum()
+    if total_pop_eth == 0:
+        return None
+
+    # ---------------------------------------------------
+    # 2) Filtrim i df_ga (Gjinia & Mosha)
+    # ---------------------------------------------------
+    df_age = df_ga[df_ga["Komuna"].isin(komuna_filter)]
+    df_age = df_age[df_age["Gjinia"].isin(gender_selected)]
+
+    # moshat numerike
+    age_cols = [c for c in df_age.columns if str(c).isdigit()]
+
+    # define max_age sipas CAWI
+    if data_collection_method == "CAWI" and max_age is None:
+        max_age = 120
+
+    if max_age is None:
+        max_age = max(map(int, age_cols))
+
+    # zbatimi i filtrit të moshës
+    age_mask_cols = [c for c in age_cols if min_age <= int(c) <= max_age]
+    df_age["Pop_age"] = df_age[age_mask_cols].sum(axis=1)
+
+    total_pop_age = df_age["Pop_age"].sum()
+
+    # ---------------------------------------------------
+    # 3) Koeficientët për çdo dimension
+    # ---------------------------------------------------
+
+    # KOMUNA
+    pop_kom = df_pop.groupby("Komuna")["Pop_base"].sum()
+    coef_kom = pop_kom / pop_kom.sum()
+
+    # REGJION
+    df_pop["Regjion"] = df_pop["Komuna"].map(region_map)
+    pop_reg = df_pop.groupby("Regjion")["Pop_base"].sum()
+    coef_reg = pop_reg / pop_reg.sum()
+
+    # ETNIA
+    pop_eth = df_pop.groupby("Etnia")["Pop_base"].sum()
+    coef_eth = pop_eth / pop_eth.sum()
+
+    # VENDBANIM
+    pop_vb = df_pop.groupby("Vendbanimi")["Pop_base"].sum()
+    coef_vb = pop_vb / pop_vb.sum()
+
+    # GJINIA
+    pop_gender = df_age.groupby("Gjinia")["Pop_age"].sum()
+    coef_gender = pop_gender / pop_gender.sum()
+
+    # GRUPMOSHA
+    def map_age_group(a):
+        a = int(a)
+        if data_collection_method == "CAWI":
+            if a >= 55: return "55+"
+        else:
+            if a >= 65: return "65+"
+        bins = [(18,24),(25,34),(35,44),(45,54),(55,64)]
+        for lo,hi in bins:
+            if lo <= a <= hi:
+                return f"{lo}-{hi}"
+        return None
+
+    long_age = []
+    for _, row in df_age.iterrows():
+        for c in age_mask_cols:
+            count = row[c]
+            group = map_age_group(int(c))
+            if group and count > 0:
+                long_age.append((group, count))
+
+    df_age_long = pd.DataFrame(long_age, columns=["Age_group","Count"])
+    pop_age_grp = df_age_long.groupby("Age_group")["Count"].sum()
+    coef_age = pop_age_grp / pop_age_grp.sum()
+
+    # ---------------------------------------------------
+    # Ndërto tabelën finale
+    # ---------------------------------------------------
+    out = []
+
+    def append_block(dim, series_pop, series_coef):
+        for cat, pop in series_pop.items():
+            out.append({
+                "Dimensioni": dim,
+                "Kategoria": cat,
+                "Populacioni": pop,
+                "Pesha": float(series_coef[cat])
+            })
+
+    append_block("Komuna", pop_kom, coef_kom)
+    append_block("Regjion", pop_reg, coef_reg)
+    append_block("Etnia", pop_eth, coef_eth)
+    append_block("Vendbanimi", pop_vb, coef_vb)
+    append_block("Gjinia", pop_gender, coef_gender)
+    append_block("Grupmosha", pop_age_grp, coef_age)
+
+    return pd.DataFrame(out)
+
+def add_codes_to_coef_df(coef_df, data_collection_method):
+    """
+    Shton kolonën 'Code' në coef_df bazuar në kategorizimet standarde.
+    """
+
+    # ------------------------------
+    # KOMUNA (1–38)
+    # ------------------------------
+    komuna_codes = {
+        "Prishtinë":1, "Deçan":2, "Dragash":3, "Ferizaj":4, "Fushë Kosovë":5, 
+        "Gjakovë":6, "Gjilan":7, "Gllogoc":8, "Graçanicë":9, "Han i Elezit":10,
+        "Istog":11, "Junik":12, "Kaçanik":13, "Kamenicë":14, "Klinë":15,
+        "Kllokot":16, "Leposaviq":17, "Leposavic":17, "Lipjan":18, 
+        "Malishevë":19, "Mamushë":20, "Mitrovicë":21, "Mitrovica Veriore":22,
+        "Novobërdë":23, "Obiliq":24, "Partesh":25, "Pejë":26, "Podujevë":27,
+        "Prizren":28, "Rahovec":29, "Ranillug":30, "Skënderaj":31,
+        "Suharekë":32, "Shtërpcë":33, "Shtime":34, "Viti":35, "Vushtrri":36,
+        "Zubin Potok":37, "Zvecan":38
+    }
+
+    # ------------------------------
+    # REGJIONET (1–7)
+    # ------------------------------
+    region_codes = {
+        "Prishtinë":1,
+        "Mitrovicë":2,
+        "Pejë":3,
+        "Prizren":4,
+        "Ferizaj":5,
+        "Gjilan":6,
+        "Gjakovë":7
+    }
+
+    # ------------------------------
+    # VENDBANIMI (1–2)
+    # ------------------------------
+    vb_codes = {"Urban":1, "Rural":2}
+
+    # ------------------------------
+    # GJINIA (1–2)
+    # ------------------------------
+    gender_codes = {"Femra":1, "Femer":1, "Mashkull":2, "Meshkuj":2}
+
+    # ------------------------------
+    # ETNIA (1–3)
+    # ------------------------------
+    eth_codes = {"Shqiptar":1, "Serb":2, "Tjerë":3, "Tjeter":3}
+
+    # ------------------------------
+    # GRUPMOSHA (dinamike)
+    # ------------------------------
+    if data_collection_method == "CAWI":
+        age_codes = {
+            "18-24":1,
+            "25-34":2,
+            "35-44":3,
+            "45-54":4,
+            "55+":5
+        }
+    else:  # CAPI/CATI
+        age_codes = {
+            "18-24":1,
+            "25-34":2,
+            "35-44":3,
+            "45-54":4,
+            "55-64":5,
+            "65+":6
+        }
+
+    # ------------------------------
+    # SHTO CODEN
+    # ------------------------------
+    def get_code(row):
+        dim = row["Dimensioni"]
+        cat = row["Kategoria"]
+
+        if dim == "Komuna":
+            return komuna_codes.get(cat, None)
+        if dim == "Regjion":
+            return region_codes.get(cat, None)
+        if dim == "Vendbanimi":
+            return vb_codes.get(cat, None)
+        if dim == "Gjinia":
+            return gender_codes.get(cat, None)
+        if dim == "Etnia":
+            return eth_codes.get(cat, None)
+        if dim == "Grupmosha":
+            return age_codes.get(cat, None)
+
+        return None
+
+    coef_df["Kodi"] = coef_df.apply(get_code, axis=1)
+    return coef_df
+
+def generate_spss_syntax(coef_df, recode_d3_text, data_collection_method):
+    """
+    Gjeneron tekstin komplet të SPSS syntax duke përfshirë:
+    - RECODE D3 (siç e jep përdoruesi)
+    - RECODE për Grupmosha
+    - SPSSINC RAKE me të gjitha dimensionet
+    """
+
+    # --------------------------------------------
+    # 1. HEADER
+    # --------------------------------------------
+    out = "* Encoding: UTF-8.\n\n"
+
+    # --------------------------------------------
+    # 2. Shto RECODE D3 (Regjioni) siç është dhënë
+    # --------------------------------------------
+    out += recode_d3_text.strip() + "\n\n"
+
+    # --------------------------------------------
+    # 3. RECODE për Grupmoshat (D2)
+    # --------------------------------------------
+    if data_collection_method == "CAWI":
+        out += (
+            "* Visual Binning for CAWI.\n"
+            "RECODE D2 (MISSING=COPY) "
+            "(18 THRU 24 = 1) "
+            "(25 THRU 34 = 2) "
+            "(35 THRU 44 = 3) "
+            "(45 THRU 54 = 4) "
+            "(55 THRU HI = 5) "
+            "INTO Grupmoshat.\n"
+            "VARIABLE LABELS Grupmoshat 'Mosha (Binned)'.\n"
+            "VALUE LABELS Grupmoshat 1 '18-24' 2 '25-34' 3 '35-44' 4 '45-54' 5 '55+'.\n"
+            "EXECUTE.\n\n"
+        )
+    else:
+        out += (
+            "* Visual Binning for CAPI/CATI.\n"
+            "RECODE D2 (MISSING=COPY) "
+            "(18 THRU 24 = 1) "
+            "(25 THRU 34 = 2) "
+            "(35 THRU 44 = 3) "
+            "(45 THRU 54 = 4) "
+            "(55 THRU 64 = 5) "
+            "(65 THRU HI = 6) "
+            "INTO Grupmoshat.\n"
+            "VARIABLE LABELS Grupmoshat 'Mosha (Binned)'.\n"
+            "VALUE LABELS Grupmoshat "
+            "1 '18-24' 2 '25-34' 3 '35-44' 4 '45-54' 5 '55-64' 6 '65+'.\n"
+            "EXECUTE.\n\n"
+        )
+
+    # --------------------------------------------
+    # 4. SPSSINC RAKE
+    # --------------------------------------------
+    out += "SPSSINC RAKE\n"
+
+    # Dimension ordering
+    dim_order = ["Komuna", "Regjion", "Gjinia", "Grupmosha", "Vendbanimi", "Etnia"]
+
+    dim_index = 1
+
+    for dim in dim_order:
+        df_dim = coef_df[coef_df["Dimensioni"] == dim]
+
+        if df_dim.empty:
+            continue
+
+        out += f"DIM{dim_index}={dim} "
+
+        for _, row in df_dim.iterrows():
+            code = int(row["Kodi"])
+            coef = float(row["Pesha"])
+            out += f"{code} {coef}\n"
+
+        dim_index += 1
+
+    out += "FINALWEIGHT=peshat.\n"
+
+    return out
+
 # Load data
 try:
     df_eth = load_ethnicity_settlement_data("excel-files/ASK-2024-Komuna-Etnia-Vendbanimi.xlsx")
@@ -1827,6 +2177,7 @@ if run_button:
     # PSU-të vetëm nëse metoda është CAPI dhe niveli kryesor është Komunë
     # =====================================================
     if data_collection_method == "CAPI":
+        st.markdown("---")
         if primary_level != "Komunë":
             st.info("Llogaritja e PSU-ve është e implementuar vetëm kur ndarja kryesore është sipas **Komunës**.")
         else:
@@ -1923,7 +2274,10 @@ if run_button:
     elif data_collection_method == "CAWI":
         narrative_text += narrative_template_cawi
 
-    with st.expander("📄 Shfaq narrativën automatike të mostrës"):
+    st.markdown("---")  
+    st.subheader("Përshkrimi i dizajnimit të mostrës")
+
+    with st.expander("Shfaq përshkrimin e dizajnimit të mostrës"):
         st.markdown(narrative_text)
 
     
@@ -1943,10 +2297,43 @@ if run_button:
                 border-radius:8px;
                 margin-top:10px;
                 cursor:pointer;">
-                📄 Shkarko Narrativën (Word)
+                Shkarko Narrativën (Word)
             </div>
         </a>
     """, unsafe_allow_html=True)
+
+    coef_df = compute_population_coefficients(
+    df_ga=df_ga,
+    df_eth=df_eth,
+    region_map=region_map,
+    gender_selected=gender_selected,
+    min_age=min_age,
+    max_age=max_age,
+    eth_filter=eth_filter,
+    settlement_filter=settlement_filter,
+    komuna_filter=komuna_filter,
+    data_collection_method=data_collection_method
+    )
+
+    coef_df = add_codes_to_coef_df(coef_df, data_collection_method)
+
+    st.markdown("---")
+    st.subheader("Sintaksa për peshim në SPSS")
+
+    with st.expander("Shfaq tabelën e plotë të peshave", expanded=False):
+        st.dataframe(coef_df, use_container_width=True)
+
+    spss_text = generate_spss_syntax(
+    coef_df,
+    recode_d3_text=RECODE_D3_TEMPLATE,
+    data_collection_method=data_collection_method
+)
+
+    create_download_link(
+        file_bytes=spss_text.encode("utf-8"),
+        filename="syntax_peshat.sps",
+        label="Shkarko Peshat për SPSS"
+    )
 
 else:
     st.info("Cakto parametrat kryesorë dhe kliko **'Gjenero shpërndarjen e mostrës'** për të dizajnuar mostrën.")
