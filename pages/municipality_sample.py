@@ -8,8 +8,10 @@ st.set_page_config(
     layout="wide"
 )
 
-import uuid
-st.write("RUN ID:", uuid.uuid4())
+if "page_initialized" not in st.session_state:
+    st.session_state.page_initialized = True
+else:
+    st.stop()
 
 import pandas as pd
 import numpy as np
