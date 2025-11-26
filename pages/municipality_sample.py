@@ -1,4 +1,5 @@
 import streamlit as st
+import uuid
 # =====================================================
 # PAGE SETTINGS & HEADER
 # =====================================================
@@ -8,10 +9,11 @@ st.set_page_config(
     layout="wide"
 )
 
-if "page_initialized" not in st.session_state:
-    st.session_state.page_initialized = True
-else:
+if st.session_state.get("municipality_loaded_once"):
     st.stop()
+else:
+    st.session_state["municipality_loaded_once"] = True
+
 
 import pandas as pd
 import numpy as np
