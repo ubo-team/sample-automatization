@@ -5,6 +5,7 @@ import re
 from docx import Document
 from io import BytesIO
 import base64
+import pydeck as pdk
 
 st.markdown("""
     <div style='width: 100%; padding: 20px 30px; background: #ffffff;
@@ -978,7 +979,14 @@ def compute_psu_table_for_all_municipalities(
         return pd.DataFrame()
 
     final_psu = pd.concat(all_rows, ignore_index=True)
-    return final_psu
+    return final_psu[
+        [
+            "Komuna",
+            "Fshati/Qyteti",
+            "Vendbanimi",
+            "Intervista"
+        ]
+    ]
 
 def extract_urban_interviews(pivot_row):
     urban_cols = [c for c in pivot_row.index if "Urban" in str(c)]
@@ -1232,7 +1240,8 @@ max_age = int(max_age) if max_age.strip() else None
 eth_filter = st.sidebar.multiselect(
     "Etnitë që përfshihen",
     options=["Shqiptar", "Serb", "Tjerë"],
-    default=["Shqiptar", "Serb", "Tjerë"]
+    default=["Shqiptar", "Serb", "Tjerë"], 
+    key = "Etnia-nacionale"
 )
 
 # Settlement filter
@@ -1847,6 +1856,46 @@ if run_button:
                     filename="psu_capi_tegjitha_komunat.xlsx",
                     label="Shkarko PSU-të"
                 )
+
+        st.subheader("Harta e PSU-ve të përzgjedhura")
+
+            # Remove the artificial urban row BEFORE merging with coordinates
+        df_map = psu_table[["Komuna", "Fshati/Qyteti", "Intervista"]].copy()
+        df_map.loc[df_map["Fshati/Qyteti"] == "Urban", "Fshati/Qyteti"] = \
+        df_map.loc[df_map["Fshati/Qyteti"] == "Urban", "Komuna"]
+
+
+            # Merge with PSU coordinates
+        df_map = df_map.merge(
+                df_psu[["Komuna", "Fshati/Qyteti", "lat", "long"]],
+                on=["Komuna", "Fshati/Qyteti"],
+                how="left"
+            )
+
+        layer = pdk.Layer(
+            "ScatterplotLayer",
+            data=df_map,
+            get_position='[long, lat]',
+            get_fill_color='[200, 30, 0, 160]',
+            get_radius=600,
+            pickable=True
+        )
+
+        view_state = pdk.ViewState(
+            latitude=df_map["lat"].mean(),
+            longitude=df_map["long"].mean(),
+            zoom=8
+        )
+
+        deck = pdk.Deck(
+            layers=[layer],
+            initial_view_state=view_state,
+            map_provider="carto",     
+            map_style="light",        
+            tooltip={"html": "<b>{Komuna}</b><br>{Fshati/Qyteti}</b><br>{Intervista} intervista"}
+        )
+
+        st.pydeck_chart(deck)
 
     # COMMON SECTION (always included)
     if not oversample_enabled:

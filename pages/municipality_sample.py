@@ -1,9 +1,8 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
-from io import BytesIO
-import base64
-import re
+import pydeck as pdk
+
 from pages.national_sample import (compute_filtered_pop_for_psu_row, controlled_rounding, load_psu_data, df_to_excel_bytes, create_download_link, create_download_link2)
 
 st.markdown("""
@@ -240,7 +239,7 @@ if run:
 
     st.caption(caption_main)
 
-    st.subheader("Tabela finale e mostrës brenda komunës")
+    st.subheader("Tabela e ndarjes së mostrës brenda komunës")
     st.dataframe(sample, use_container_width=True)
 
     with st.expander("Shfaq tabelën e plotë të stratum-eve (long format)", expanded=False):
@@ -264,5 +263,50 @@ if run:
         filename=f"mostra_strata_{komuna}.xlsx",
         label="Shkarko Strata"
     )
+
+    # =====================================================
+    # 6) INTERACTIVE MAP WITH FOLIUM (Urban removed)
+    # =====================================================
+
+    st.subheader("Harta e vendeve të përzgjedhura në mostër")
+
+        # Remove the artificial urban row BEFORE merging with coordinates
+    df_map = final[["Komuna", "Fshati/Qyteti", "Intervista"]].copy()
+    df_map.loc[df_map["Fshati/Qyteti"] == "Urban", "Fshati/Qyteti"] = \
+    df_map.loc[df_map["Fshati/Qyteti"] == "Urban", "Komuna"]
+
+
+        # Merge with PSU coordinates
+    df_map = df_map.merge(
+            df_psu[["Komuna", "Fshati/Qyteti", "lat", "long"]],
+            on=["Komuna", "Fshati/Qyteti"],
+            how="left"
+        )
+
+    layer = pdk.Layer(
+        "ScatterplotLayer",
+        data=df_map,
+        get_position='[long, lat]',
+        get_fill_color='[200, 30, 0, 160]',
+        get_radius=200,
+        pickable=True
+    )
+
+    view_state = pdk.ViewState(
+        latitude=df_map["lat"].mean(),
+        longitude=df_map["long"].mean(),
+        zoom=11
+    )
+
+    deck = pdk.Deck(
+        layers=[layer],
+        initial_view_state=view_state,
+        map_provider="carto",     # ⭐ REQUIRED
+        map_style="light",        # ⭐ WORKS WITHOUT TOKEN
+        tooltip={"html": "<b>{Fshati/Qyteti}</b><br>{Intervista} intervista"}
+    )
+
+    st.pydeck_chart(deck)
+    
 else:
-    st.info("Cakto parametrat kryesorë dhe kliko **'Gjenero shpërndarjen e mostrës'** për të dizajnuar mostrën..")
+    st.info("Cakto parametrat kryesorë dhe kliko **'Gjenero shpërndarjen e mostrës'** për të dizajnuar mostrën.")
