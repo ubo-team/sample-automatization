@@ -1,11 +1,4 @@
 import streamlit as st
-import pandas as pd
-import numpy as np
-import pydeck as pdk
-
-from pages.national_sample import (compute_filtered_pop_for_psu_row, controlled_rounding, load_psu_data, df_to_excel_bytes, 
-                                   create_download_link, create_download_link2, compute_population_coefficients, add_codes_to_coef_df, df_eth, df_ga, region_map)
-
 # =====================================================
 # PAGE SETTINGS & HEADER
 # =====================================================
@@ -14,6 +7,14 @@ st.set_page_config(
     page_title="Mostra sipas Komunës",
     layout="wide"
 )
+
+import pandas as pd
+import numpy as np
+import pydeck as pdk
+
+from pages.national_sample import (compute_filtered_pop_for_psu_row, controlled_rounding, load_psu_data, df_to_excel_bytes, 
+                                   create_download_link, create_download_link2, compute_population_coefficients, add_codes_to_coef_df, df_eth, df_ga, region_map)
+
 
 st.markdown("""
     <div style='width: 100%; padding: 20px 30px; background: #ffffff;
