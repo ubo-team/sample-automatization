@@ -1550,13 +1550,13 @@ def generate_recode_age_dynamic(merged_bins, labels):
             # Grupi i fundit ZGJIDHET NË Visual Binning SI: LO THRU HI
             out += f"(LO THRU HI={idx}) "
 
-    out += "(ELSE=SYSMIS) INTO Grupmoshat.\n"
+    out += "(ELSE=SYSMIS) INTO Grupmosha.\n"
 
     # Meta info
-    out += "VARIABLE LABELS  Grupmoshat 'Mosha (Binned)'.\n"
-    out += "FORMATS  Grupmoshat (F5.0).\n"
+    out += "VARIABLE LABELS  Grupmosha 'Mosha (Binned)'.\n"
+    out += "FORMATS  Grupmosha (F5.0).\n"
 
-    out += "VALUE LABELS  Grupmoshat "
+    out += "VALUE LABELS  Grupmosha "
 
     for idx, label in enumerate(labels, start=1):
         # Convert "18-24" -> "18 - 24"
@@ -1569,7 +1569,7 @@ def generate_recode_age_dynamic(merged_bins, labels):
         out += f"{idx} '{lbl}' "
 
     out += ".\n"
-    out += "VARIABLE LEVEL  Grupmoshat (ORDINAL).\n"
+    out += "VARIABLE LEVEL  Grupmosha (ORDINAL).\n"
     out += "EXECUTE.\n\n"
 
     return out
