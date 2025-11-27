@@ -109,12 +109,20 @@ def generate_spss_syntax_municipality(coef_df, data_collection_method, min_age, 
         # ---------------------------------------------------
 
         def parse_range(g):
+            g = g.strip()
             if "+" in g:
                 lo = int(g.replace("+", "").strip())
                 hi = 999
-            else:
-                lo, hi = g.replace(" ", "").split("-")
-                lo, hi = int(lo), int(hi)
+                return lo, hi
+
+            lo, hi = g.replace(" ", "").split("-")
+            lo = int(lo)
+            hi = int(hi)
+
+            # Çdo grup që përfundon me >85 e trajtojmë si open-ended
+            if hi >= 85:
+                return lo, 999
+
             return lo, hi
 
         df_age["lo_hi"] = df_age["Kategoria"].apply(parse_range)
@@ -126,14 +134,14 @@ def generate_spss_syntax_municipality(coef_df, data_collection_method, min_age, 
 
         for _, row in df_age.iterrows():
             lo, hi = row["lo_hi"]
-            label = row["Kategoria"]
 
-            if "HI" in label or "+" in label:
+            if hi == 999:
                 recode_lines.append(f"(LO THRU HI = {code})")
+                value_labels += f" {code} '{lo}+' \n"
             else:
                 recode_lines.append(f"(LO THRU {hi} = {code})")
+                value_labels += f" {code} '{lo}-{hi}' \n"
 
-            value_labels += f" {code} '{label}'\n"
             code += 1
 
     # ===============================================================
@@ -175,31 +183,6 @@ def generate_spss_syntax_municipality(coef_df, data_collection_method, min_age, 
     out += "FINALWEIGHT=peshat.\n"
 
     return out
-
-    # ===============================================================
-    # 2) SPSSINC RAKE — vetëm për dimensionet që ekzistojnë
-    # ===============================================================
-    out += "SPSSINC RAKE\n"
-
-    dim_order = ["Gjinia", "Grupmosha", "Vendbanimi", "Etnia"]
-
-    dim_i = 1
-    for dim in dim_order:
-        df_dim = coef_df[coef_df["Dimensioni"] == dim]
-
-        if df_dim.empty:
-            continue
-
-        out += f"DIM{dim_i}={dim} "
-        for _, row in df_dim.iterrows():
-            out += f"{int(row['Kodi'])} {row['Pesha']}\n"
-
-        dim_i += 1
-
-    out += "FINALWEIGHT=peshat.\n"
-
-    return out
-
 # =====================================================
 # LOAD PSU DATA
 # =====================================================
@@ -470,6 +453,35 @@ if run:
     komuna_filter=[komuna],               # shumë e rëndësishme!
     data_collection_method=data_collection_method
 )
+    # ============================================
+    # FIX: Formatimi i etiketimeve të Grupmoshave
+    # ============================================
+    def fix_age_label(label):
+        label = str(label).strip()
+
+        # Shembuj: "18-24", "65-200", "65-120", "55-64"
+        if "-" in label:
+            lo, hi = label.split("-")
+            lo = lo.strip()
+            hi = hi.strip()
+
+            # HI → kthente 200 → duhet të bëhet "+"
+            if hi in ["200", "300", "999"]:
+                return f"{lo}+"
+
+            # Përndryshe normalizim "18-24"
+            return f"{lo}-{hi}"
+
+        # Për raste si "65+"
+        if label.endswith("+"):
+            return label
+
+        return label
+
+    # Apliko fix vetëm te Grupmosha
+    coef_df.loc[coef_df["Dimensioni"] == "Grupmosha", "Kategoria"] = \
+        coef_df.loc[coef_df["Dimensioni"] == "Grupmosha", "Kategoria"].apply(fix_age_label)
+
 
     dims_to_keep = ["Gjinia", "Grupmosha", "Vendbanimi", "Etnia"]
     coef_df = coef_df[coef_df["Dimensioni"].isin(dims_to_keep)]

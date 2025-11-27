@@ -1361,7 +1361,9 @@ def compute_population_coefficients(
             for idx, (lo, hi) in enumerate(merged_bins):
                 if lo <= age <= hi:
                     # Përgatisim formatimin e etiketës
-                    if hi >= 200:
+                    if hi >= 85 and data_collection_method!="CAWI":
+                        label = f"{lo}+"
+                    elif hi >= 65 and data_collection_method=="CAWI":
                         label = f"{lo}+"
                     else:
                         label = f"{lo}-{hi}"
