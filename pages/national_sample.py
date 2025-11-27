@@ -1340,26 +1340,22 @@ def compute_population_coefficients(
     append_block("Gjinia", pop_gender)
 
     # ---------------------------------------------------
-    # 6) Grupmoshat
+    # 6) Grupmoshat (dynamic bins)
     # ---------------------------------------------------
-    def map_age_group(a):
-        a = int(a)
-        if data_collection_method == "CAWI":
-            if a >= 55: return "55+"
-        else:
-            if a >= 65: return "65+"
-        bins = [(18,24),(25,34),(35,44),(45,54),(55,64)]
-        for lo,hi in bins:
-            if lo <= a <= hi:
-                return f"{lo}-{hi}"
-        return None
+    merged_bins, labels = create_dynamic_age_groups(min_age, max_age, data_collection_method)
 
     long_age = []
+
     for _, row in df_age.iterrows():
-        for c in age_mask_cols:
-            grp = map_age_group(int(c))
-            if grp:
-                long_age.append((grp, row[c]))
+        for col in age_mask_cols:
+            age = int(col)
+            pop = row[col]
+
+            # find bin for this age
+            for idx, (lo, hi) in enumerate(merged_bins):
+                if lo <= age <= hi:
+                    long_age.append((labels[idx], pop))
+                    break
 
     if long_age:
         df_age_long = pd.DataFrame(long_age, columns=["Age_group","Count"])
@@ -1373,12 +1369,15 @@ def compute_population_coefficients(
 
 def add_codes_to_coef_df(coef_df, data_collection_method):
     """
-    Shton kolonën 'Code' në coef_df bazuar në kategorizimet standarde.
+    Shton kolonën 'Kodi' në coef_df.
+    - Të gjitha dimensionet marrin kodet fikse (si më parë)
+    - Vetëm Grupmosha merr kodim dinamik sipas renditjes së saj reale (pas filtrimit)
     """
 
-    # ------------------------------
-    # KOMUNA (1–38)
-    # ------------------------------
+    # ======================
+    # 1. Kodet fikse
+    # ======================
+
     komuna_codes = {
         "Prishtinë":1, "Deçan":2, "Dragash":3, "Ferizaj":4, "Fushë Kosovë":5, 
         "Gjakovë":6, "Gjilan":7, "Gllogoc":8, "Graçanicë":9, "Han i Elezit":10,
@@ -1391,81 +1390,192 @@ def add_codes_to_coef_df(coef_df, data_collection_method):
         "Zubin Potok":37, "Zvecan":38
     }
 
-    # ------------------------------
-    # REGJIONET (1–7)
-    # ------------------------------
     region_codes = {
-        "Prishtinë":1,
-        "Mitrovicë":2,
-        "Pejë":3,
-        "Prizren":4,
-        "Ferizaj":5,
-        "Gjilan":6,
-        "Gjakovë":7
+        "Prishtinë":1, "Mitrovicë":2, "Pejë":3, "Prizren":4,
+        "Ferizaj":5, "Gjilan":6, "Gjakovë":7
     }
 
-    # ------------------------------
-    # VENDBANIMI (1–2)
-    # ------------------------------
     vb_codes = {"Urban":1, "Rural":2}
-
-    # ------------------------------
-    # GJINIA (1–2)
-    # ------------------------------
     gender_codes = {"Femra":1, "Femer":1, "Mashkull":2, "Meshkuj":2}
-
-    # ------------------------------
-    # ETNIA (1–3)
-    # ------------------------------
     eth_codes = {"Shqiptar":1, "Serb":2, "Tjerë":3, "Tjeter":3}
 
-    # ------------------------------
-    # GRUPMOSHA (dinamike)
-    # ------------------------------
-    if data_collection_method == "CAWI":
-        age_codes = {
-            "18-24":1,
-            "25-34":2,
-            "35-44":3,
-            "45-54":4,
-            "55+":5
-        }
-    else:  # CAPI/CATI
-        age_codes = {
-            "18-24":1,
-            "25-34":2,
-            "35-44":3,
-            "45-54":4,
-            "55-64":5,
-            "65+":6
-        }
+    # ==========================
+    # 2. Fillimisht vendos kodet fikse
+    # ==========================
 
-    # ------------------------------
-    # SHTO CODEN
-    # ------------------------------
-    def get_code(row):
+    def get_fixed_code(row):
         dim = row["Dimensioni"]
         cat = row["Kategoria"]
 
-        if dim == "Komuna":
-            return komuna_codes.get(cat, None)
-        if dim == "Regjion":
-            return region_codes.get(cat, None)
-        if dim == "Vendbanimi":
-            return vb_codes.get(cat, None)
-        if dim == "Gjinia":
-            return gender_codes.get(cat, None)
-        if dim == "Etnia":
-            return eth_codes.get(cat, None)
-        if dim == "Grupmosha":
-            return age_codes.get(cat, None)
+        if dim == "Komuna": return komuna_codes.get(cat)
+        if dim == "Regjion": return region_codes.get(cat)
+        if dim == "Vendbanimi": return vb_codes.get(cat)
+        if dim == "Gjinia": return gender_codes.get(cat)
+        if dim == "Etnia": return eth_codes.get(cat)
 
+        # Grupmosha KALO HETU – do mbushet më vonë dinamikisht
         return None
 
-    coef_df["Kodi"] = coef_df.apply(get_code, axis=1)
+    coef_df["Kodi"] = coef_df.apply(get_fixed_code, axis=1)
+
+    # ==========================
+    # 3. KODIMI DINAMIK I GRUPMOSHËS
+    # ==========================
+
+    df_age = coef_df[coef_df["Dimensioni"] == "Grupmosha"].copy()
+
+    if not df_age.empty:
+
+        # (a) Parsimi i vlerave të moshës në numra
+        parsed = []
+        for g in df_age["Kategoria"]:
+            g = str(g)
+
+            if "-" in g:
+                lo, hi = g.split("-")
+                lo, hi = int(lo), int(hi)
+            elif g.endswith("+"):
+                lo = int(g.replace("+", ""))
+                hi = 999
+            else:
+                continue
+
+            parsed.append((g, lo, hi))
+
+        # (b) Rendit grupmoshat sipas moshës
+        parsed_sorted = sorted(parsed, key=lambda x: x[1])
+
+        # (c) Gjenero kodet 1,2,3,... automatikisht
+        dynamic_age_codes = {grp: i+1 for i, (grp, _, _) in enumerate(parsed_sorted)}
+
+        # (d) Mbishkruaj kolonën Kodi *vetëm për Grupmoshën*
+        coef_df.loc[coef_df["Dimensioni"] == "Grupmosha", "Kodi"] = \
+            coef_df.loc[coef_df["Dimensioni"] == "Grupmosha", "Kategoria"].map(dynamic_age_codes)
+
     return coef_df
 
+def create_dynamic_age_groups(age_min, age_max, data_collection_method):
+    """
+    Krijon grupmosha dinamike duke respektuar:
+    - filtrin min/max
+    - grup minimal = 5 vite
+    - bashkim të grupeve të vogla në fillim, fund dhe mes
+    """
+
+    # Standard bins
+    base = [
+        (18,24),
+        (25,34),
+        (35,44),
+        (45,54),
+        (55,64),
+        (65,200)
+    ]
+
+    # CAWI has 55+ only
+    if data_collection_method == "CAWI":
+        base = [
+            (18,24),
+            (25,34),
+            (35,44),
+            (45,54),
+            (55,200)
+        ]
+
+    hi_age = age_max if age_max is not None else 200
+
+    # 1) CLIP bins to filter
+    clipped = []
+    for lo, hi in base:
+        new_lo = max(lo, age_min)
+        new_hi = min(hi, hi_age)
+        if new_lo <= new_hi:
+            clipped.append((new_lo, new_hi))
+
+    # 2) FIX small first bin (<5 years)
+    if len(clipped) >= 2:
+        lo, hi = clipped[0]
+        if (hi - lo + 1) < 5:
+            # merge with next
+            next_lo, next_hi = clipped[1]
+            merged = (lo, next_hi)
+            clipped = [merged] + clipped[2:]
+
+    # 3) FIX small middle bins (<5 years)
+    merged_bins = []
+    for lo, hi in clipped:
+        length = hi - lo + 1
+        if merged_bins and length < 5:
+            # merge with previous
+            prev_lo, prev_hi = merged_bins[-1]
+            merged_bins[-1] = (prev_lo, hi)
+        else:
+            merged_bins.append((lo, hi))
+
+    # 4) FIX small last bin (<5 years)
+    if len(merged_bins) >= 2:
+        lo, hi = merged_bins[-1]
+        if (hi - lo + 1) < 5:
+            prev_lo, prev_hi = merged_bins[-2]
+            merged_bins[-2] = (prev_lo, hi)
+            merged_bins = merged_bins[:-1]
+
+    # 5) Labels
+    labels = []
+    for lo, hi in merged_bins:
+        if hi >= 200:
+            labels.append(f"{lo}+")
+        else:
+            labels.append(f"{lo}-{hi}")
+
+    return merged_bins, labels
+
+def generate_recode_age_dynamic(merged_bins, labels):
+    """
+    Gjeneron sintaksën SPSS në formatin Visual Binning për grupmoshat dinamike.
+    merged_bins = [(lo, hi), ...]
+    labels      = ["lo-hi", "hi+", ...]
+    """
+
+    out = "* Visual Binning.\n"
+    out += "*Mosha.\n"
+
+    out += "RECODE  D2 (MISSING=COPY) "
+
+    # Të gjithë grupet përveç të fundit
+    for idx, (lo, hi) in enumerate(merged_bins, start=1):
+        if idx < len(merged_bins):
+            out += f"(LO THRU {hi}={idx}) "
+        else:
+            # Grupi i fundit ZGJIDHET NË Visual Binning SI: LO THRU HI
+            out += f"(LO THRU HI={idx}) "
+
+    out += "(ELSE=SYSMIS) INTO Grupmoshat.\n"
+
+    # Meta info
+    out += "VARIABLE LABELS  Grupmoshat 'Mosha (Binned)'.\n"
+    out += "FORMATS  Grupmoshat (F5.0).\n"
+
+    out += "VALUE LABELS  Grupmoshat "
+
+    for idx, label in enumerate(labels, start=1):
+        # Convert "18-24" -> "18 - 24"
+        if "-" in label:
+            a, b = label.split("-")
+            lbl = f"{a.strip()} - {b.strip()}"
+        else:
+            lbl = label.strip()
+
+        out += f"{idx} '{lbl}' "
+
+    out += ".\n"
+    out += "VARIABLE LEVEL  Grupmoshat (ORDINAL).\n"
+    out += "EXECUTE.\n\n"
+
+    return out
+
 def generate_spss_syntax(coef_df, recode_d3_text, data_collection_method):
+    
     """
     Gjeneron tekstin komplet të SPSS syntax duke përfshirë:
     - RECODE D3 (siç e jep përdoruesi)
@@ -1486,36 +1596,8 @@ def generate_spss_syntax(coef_df, recode_d3_text, data_collection_method):
     # --------------------------------------------
     # 3. RECODE për Grupmoshat (D2)
     # --------------------------------------------
-    if data_collection_method == "CAWI":
-        out += (
-            "* Visual Binning for CAWI.\n"
-            "RECODE D2 (MISSING=COPY) "
-            "(18 THRU 24 = 1) "
-            "(25 THRU 34 = 2) "
-            "(35 THRU 44 = 3) "
-            "(45 THRU 54 = 4) "
-            "(55 THRU HI = 5) "
-            "INTO Grupmoshat.\n"
-            "VARIABLE LABELS Grupmoshat 'Mosha (Binned)'.\n"
-            "VALUE LABELS Grupmoshat 1 '18-24' 2 '25-34' 3 '35-44' 4 '45-54' 5 '55+'.\n"
-            "EXECUTE.\n\n"
-        )
-    else:
-        out += (
-            "* Visual Binning for CAPI/CATI.\n"
-            "RECODE D2 (MISSING=COPY) "
-            "(18 THRU 24 = 1) "
-            "(25 THRU 34 = 2) "
-            "(35 THRU 44 = 3) "
-            "(45 THRU 54 = 4) "
-            "(55 THRU 64 = 5) "
-            "(65 THRU HI = 6) "
-            "INTO Grupmoshat.\n"
-            "VARIABLE LABELS Grupmoshat 'Mosha (Binned)'.\n"
-            "VALUE LABELS Grupmoshat "
-            "1 '18-24' 2 '25-34' 3 '35-44' 4 '45-54' 5 '55-64' 6 '65+'.\n"
-            "EXECUTE.\n\n"
-        )
+    merged_bins, labels = create_dynamic_age_groups(min_age, max_age, data_collection_method)
+    out += generate_recode_age_dynamic(merged_bins, labels)
 
     # --------------------------------------------
     # 4. SPSSINC RAKE
@@ -2394,6 +2476,7 @@ if run_button:
     with st.expander("Shfaq tabelën e plotë të peshave", expanded=False):
         st.dataframe(coef_df, use_container_width=True)
 
+    coef_df = coef_df.dropna(subset=["Kodi"])
     spss_text = generate_spss_syntax(
     coef_df,
     recode_d3_text=RECODE_D3_TEMPLATE,
