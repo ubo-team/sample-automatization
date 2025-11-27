@@ -9,12 +9,6 @@ st.set_page_config(
     layout="wide"
 )
 
-if st.session_state.get("municipality_loaded_once"):
-    st.stop()
-else:
-    st.session_state["municipality_loaded_once"] = True
-
-
 import pandas as pd
 import numpy as np
 import pydeck as pdk
@@ -66,45 +60,141 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-def generate_spss_syntax_municipality(coef_df, data_collection_method):
+def generate_spss_syntax_municipality(coef_df, data_collection_method, min_age, max_age):
+    """
+    Gjeneron SPSS syntax për municipality me:
+    - Grupmosha standarde nëse max_age = None
+    - Grupmosha dinamike kur përdoruesi zgjedh max_age
+    """
 
     out = "* Encoding: UTF-8.\n\n"
 
-    # RECODE për Grupmosha
-    if data_collection_method == "CAWI":
-        out += (
-            "RECODE D2 (MISSING=COPY) "
-            "(18 THRU 24 = 1) "
-            "(25 THRU 34 = 2) "
-            "(35 THRU 44 = 3) "
-            "(45 THRU 54 = 4) "
-            "(55 THRU HI = 5) "
-            "INTO Grupmoshat.\n"
-        )
-    else:
-        out += (
-            "RECODE D2 (MISSING=COPY) "
-            "(18 THRU 24 = 1) "
-            "(25 THRU 34 = 2) "
-            "(35 THRU 44 = 3) "
-            "(45 THRU 54 = 4) "
-            "(55 THRU 64 = 5) "
-            "(65 THRU HI = 6) "
-            "INTO Grupmoshat.\n"
-        )
+    # ===============================================================
+    # 1) GJENERO LISTËN E GRUPMOSHAVE
+    # ===============================================================
 
-    out += "\nSPSSINC RAKE\n"
+    df_age = coef_df[coef_df["Dimensioni"] == "Grupmosha"].copy()
+
+    # ---------------------------------------------------
+    # CASE 1 — Nuk ka max_age → përdor grupmosha standarde
+    # ---------------------------------------------------
+    if max_age is None:
+        if data_collection_method == "CAWI":
+            groups = [
+                ("18", "24"),
+                ("25", "34"),
+                ("35", "44"),
+                ("45", "54"),
+                ("55", "HI")
+            ]
+            labels = ["18 - 24", "25 - 34", "35 - 44", "45 - 54", "55+"]
+        else:
+            groups = [
+                ("18", "24"),
+                ("25", "34"),
+                ("35", "44"),
+                ("45", "54"),
+                ("55", "64"),
+                ("65", "HI")
+            ]
+            labels = ["18 - 24", "25 - 34", "35 - 44", "45 - 54", "55 - 64", "65+"]
+
+        # KODIMET
+        recode_lines = [f"(LO THRU {hi} = {i+1})" for i, (lo, hi) in enumerate(groups)]
+        value_labels = "\n".join([f" {i+1} '{lbl}'" for i, lbl in enumerate(labels)])
+
+    else:
+        # ---------------------------------------------------
+        # CASE 2 — max_age ekziston → përdor grupmosha dinamike
+        # ---------------------------------------------------
+
+        def parse_range(g):
+            if "+" in g:
+                lo = int(g.replace("+", "").strip())
+                hi = 999
+            else:
+                lo, hi = g.replace(" ", "").split("-")
+                lo, hi = int(lo), int(hi)
+            return lo, hi
+
+        df_age["lo_hi"] = df_age["Kategoria"].apply(parse_range)
+        df_age = df_age.sort_values(by="lo_hi", key=lambda x: x.apply(lambda y: y[0]))
+
+        recode_lines = []
+        value_labels = ""
+        code = 1
+
+        for _, row in df_age.iterrows():
+            lo, hi = row["lo_hi"]
+            label = row["Kategoria"]
+
+            if "HI" in label or "+" in label:
+                recode_lines.append(f"(LO THRU HI = {code})")
+            else:
+                recode_lines.append(f"(LO THRU {hi} = {code})")
+
+            value_labels += f" {code} '{label}'\n"
+            code += 1
+
+    # ===============================================================
+    # 2) VIZUAL BINNING
+    # ===============================================================
+    out += (
+        "* Visual Binning.\n"
+        "* Mosha.\n"
+        "RECODE D2 (MISSING=COPY)\n    "
+        + "\n    ".join(recode_lines)
+        + "\n (ELSE=SYSMIS) INTO Grupmoshat.\n"
+        "VARIABLE LABELS Grupmoshat 'Mosha (Binned)'.\n"
+        "FORMATS Grupmoshat (F5.0).\n"
+        "VALUE LABELS Grupmoshat\n"
+        f"{value_labels}"
+        "VARIABLE LEVEL Grupmoshat (ORDINAL).\n"
+        "EXECUTE.\n\n"
+    )
+
+    # ===============================================================
+    # 3) SPSSINC RAKE
+    # ===============================================================
+    out += "SPSSINC RAKE\n"
+
+    dim_order = ["Gjinia", "Grupmosha", "Vendbanimi", "Etnia"]
+    dim_i = 1
+
+    for dim in dim_order:
+        df_dim = coef_df[coef_df["Dimensioni"] == dim]
+        if df_dim.empty:
+            continue
+
+        out += f"DIM{dim_i}={dim} "
+        for _, row in df_dim.iterrows():
+            out += f"{int(row['Kodi'])} {row['Pesha']}\n"
+
+        dim_i += 1
+
+    out += "FINALWEIGHT=peshat.\n"
+
+    return out
+
+    # ===============================================================
+    # 2) SPSSINC RAKE — vetëm për dimensionet që ekzistojnë
+    # ===============================================================
+    out += "SPSSINC RAKE\n"
 
     dim_order = ["Gjinia", "Grupmosha", "Vendbanimi", "Etnia"]
 
-    i = 1
+    dim_i = 1
     for dim in dim_order:
         df_dim = coef_df[coef_df["Dimensioni"] == dim]
 
-        out += f"DIM{i}={dim} "
+        if df_dim.empty:
+            continue
+
+        out += f"DIM{dim_i}={dim} "
         for _, row in df_dim.iterrows():
             out += f"{int(row['Kodi'])} {row['Pesha']}\n"
-        i += 1
+
+        dim_i += 1
 
     out += "FINALWEIGHT=peshat.\n"
 
@@ -401,7 +491,9 @@ if run:
 
     spss_text = generate_spss_syntax_municipality(
     coef_df,
-    data_collection_method
+    data_collection_method, 
+    min_age,
+    max_age
 )
     st.markdown("---")
     st.subheader("Sintaksa për peshim në SPSS")

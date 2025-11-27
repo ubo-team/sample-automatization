@@ -1344,6 +1344,12 @@ def compute_population_coefficients(
     # ---------------------------------------------------
     merged_bins, labels = create_dynamic_age_groups(min_age, max_age, data_collection_method)
 
+    # -----------------------------
+    # 6) Grupmoshat me etiketa të pastra (18-24, 25-34, 65+)
+    # -----------------------------
+
+    merged_bins, labels = create_dynamic_age_groups(min_age, max_age, data_collection_method)
+
     long_age = []
 
     for _, row in df_age.iterrows():
@@ -1351,16 +1357,27 @@ def compute_population_coefficients(
             age = int(col)
             pop = row[col]
 
-            # find bin for this age
+            # Gjej bin për këtë moshë
             for idx, (lo, hi) in enumerate(merged_bins):
                 if lo <= age <= hi:
-                    long_age.append((labels[idx], pop))
+                    # Përgatisim formatimin e etiketës
+                    if hi >= 200:
+                        label = f"{lo}+"
+                    else:
+                        label = f"{lo}-{hi}"
+                    long_age.append((label, pop))
                     break
 
     if long_age:
-        df_age_long = pd.DataFrame(long_age, columns=["Age_group","Count"])
+        df_age_long = pd.DataFrame(long_age, columns=["Age_group", "Count"])
         pop_age_grp = df_age_long.groupby("Age_group")["Count"].sum()
+
+        # Ruaj rendin sipas moshës (p.sh. 18-24 → 25-34 → ... → 65+)
+        ordered = sorted(pop_age_grp.index, key=lambda s: int(s.split("-")[0].replace("+","")))
+        pop_age_grp = pop_age_grp[ordered]
+
         append_block("Grupmosha", pop_age_grp)
+
 
     # ---------------------------------------------------
     # Return final result
@@ -1456,13 +1473,31 @@ def add_codes_to_coef_df(coef_df, data_collection_method):
 
 def create_dynamic_age_groups(age_min, age_max, data_collection_method):
     """
-    Krijon grupmosha dinamike duke respektuar:
-    - filtrin min/max
-    - grup minimal = 5 vite
-    - bashkim të grupeve të vogla në fillim, fund dhe mes
+    Krijon grupmosha dinamike kur përdoruesi ka vendosur max_age.
+    Nëse max_age është None → kthen grupmoshat standarde sipas metodës.
     """
 
-    # Standard bins
+    # -----------------------------------------
+    # CASE A — Nuk ka max_age → përdor standardet
+    # -----------------------------------------
+    if age_max is None:
+        if data_collection_method == "CAWI":
+            base = [(18,24), (25,34), (35,44), (45,54), (55,200)]
+        else:
+            base = [(18,24), (25,34), (35,44), (45,54), (55,64), (65,200)]
+
+        labels = []
+        for lo, hi in base:
+            if hi >= 200:
+                labels.append(f"{lo}+")
+            else:
+                labels.append(f"{lo}-{hi}")
+
+        return base, labels
+
+    # -----------------------------------------
+    # CASE B — Dynamic bins
+    # -----------------------------------------
     base = [
         (18,24),
         (25,34),
@@ -1472,7 +1507,6 @@ def create_dynamic_age_groups(age_min, age_max, data_collection_method):
         (65,200)
     ]
 
-    # CAWI has 55+ only
     if data_collection_method == "CAWI":
         base = [
             (18,24),
@@ -1482,9 +1516,9 @@ def create_dynamic_age_groups(age_min, age_max, data_collection_method):
             (55,200)
         ]
 
-    hi_age = age_max if age_max is not None else 200
+    hi_age = age_max
 
-    # 1) CLIP bins to filter
+    # 1) CLIP bins
     clipped = []
     for lo, hi in base:
         new_lo = max(lo, age_min)
@@ -1492,84 +1526,69 @@ def create_dynamic_age_groups(age_min, age_max, data_collection_method):
         if new_lo <= new_hi:
             clipped.append((new_lo, new_hi))
 
-    # 2) FIX small first bin (<5 years)
+    # 2) FIX small first bin
     if len(clipped) >= 2:
         lo, hi = clipped[0]
         if (hi - lo + 1) < 5:
-            # merge with next
-            next_lo, next_hi = clipped[1]
-            merged = (lo, next_hi)
-            clipped = [merged] + clipped[2:]
+            nlo, nhi = clipped[1]
+            clipped = [(lo, nhi)] + clipped[2:]
 
-    # 3) FIX small middle bins (<5 years)
-    merged_bins = []
+    # 3) FIX small middle bins
+    merged = []
     for lo, hi in clipped:
-        length = hi - lo + 1
-        if merged_bins and length < 5:
-            # merge with previous
-            prev_lo, prev_hi = merged_bins[-1]
-            merged_bins[-1] = (prev_lo, hi)
+        if merged and (hi - lo + 1) < 5:
+            plo, phi = merged[-1]
+            merged[-1] = (plo, hi)
         else:
-            merged_bins.append((lo, hi))
+            merged.append((lo, hi))
 
-    # 4) FIX small last bin (<5 years)
-    if len(merged_bins) >= 2:
-        lo, hi = merged_bins[-1]
+    # 4) FIX last
+    if len(merged) >= 2:
+        lo, hi = merged[-1]
         if (hi - lo + 1) < 5:
-            prev_lo, prev_hi = merged_bins[-2]
-            merged_bins[-2] = (prev_lo, hi)
-            merged_bins = merged_bins[:-1]
+            plo, phi = merged[-2]
+            merged[-2] = (plo, hi)
+            merged = merged[:-1]
 
     # 5) Labels
     labels = []
-    for lo, hi in merged_bins:
+    for lo, hi in merged:
         if hi >= 200:
             labels.append(f"{lo}+")
         else:
             labels.append(f"{lo}-{hi}")
 
-    return merged_bins, labels
+    return merged, labels
 
 def generate_recode_age_dynamic(merged_bins, labels):
     """
-    Gjeneron sintaksën SPSS në formatin Visual Binning për grupmoshat dinamike.
-    merged_bins = [(lo, hi), ...]
-    labels      = ["lo-hi", "hi+", ...]
+    Gjeneron sintaksën SPSS në formatin Visual Binning.
     """
 
-    out = "* Visual Binning.\n"
-    out += "*Mosha.\n"
+    out = "* Visual Binning.\n*Mosha.\n"
+    out += "RECODE D2 (MISSING=COPY) "
 
-    out += "RECODE  D2 (MISSING=COPY) "
-
-    # Të gjithë grupet përveç të fundit
     for idx, (lo, hi) in enumerate(merged_bins, start=1):
         if idx < len(merged_bins):
             out += f"(LO THRU {hi}={idx}) "
         else:
-            # Grupi i fundit ZGJIDHET NË Visual Binning SI: LO THRU HI
             out += f"(LO THRU HI={idx}) "
 
     out += "(ELSE=SYSMIS) INTO Grupmosha.\n"
+    out += "VARIABLE LABELS Grupmosha 'Mosha (Binned)'.\n"
+    out += "FORMATS Grupmosha (F5.0).\n"
 
-    # Meta info
-    out += "VARIABLE LABELS  Grupmosha 'Mosha (Binned)'.\n"
-    out += "FORMATS  Grupmosha (F5.0).\n"
-
-    out += "VALUE LABELS  Grupmosha "
-
+    out += "VALUE LABELS Grupmosha "
     for idx, label in enumerate(labels, start=1):
-        # Convert "18-24" -> "18 - 24"
         if "-" in label:
             a, b = label.split("-")
-            lbl = f"{a.strip()} - {b.strip()}"
+            label_clean = f"{a.strip()} - {b.strip()}"
         else:
-            lbl = label.strip()
-
-        out += f"{idx} '{lbl}' "
-
+            label_clean = label
+        out += f"{idx} '{label_clean}' "
     out += ".\n"
-    out += "VARIABLE LEVEL  Grupmosha (ORDINAL).\n"
+
+    out += "VARIABLE LEVEL Grupmosha (ORDINAL).\n"
     out += "EXECUTE.\n\n"
 
     return out
@@ -1594,10 +1613,11 @@ def generate_spss_syntax(coef_df, recode_d3_text, data_collection_method):
     out += recode_d3_text.strip() + "\n\n"
 
     # --------------------------------------------
-    # 3. RECODE për Grupmoshat (D2)
+    # 3. RECODE për Grupmoshat (D2) — standarde ose dinamike
     # --------------------------------------------
     merged_bins, labels = create_dynamic_age_groups(min_age, max_age, data_collection_method)
     out += generate_recode_age_dynamic(merged_bins, labels)
+
 
     # --------------------------------------------
     # 4. SPSSINC RAKE
