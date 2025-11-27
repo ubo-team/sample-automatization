@@ -378,7 +378,7 @@ if run:
     eth_filter=eth_filter,
     settlement_filter=["Urban","Rural"],  # brenda komunes
     komuna_filter=[komuna],               # shumë e rëndësishme!
-    data_collection_method=add_codes_to_coef_df
+    data_collection_method=data_collection_method
 )
 
     dims_to_keep = ["Gjinia", "Grupmosha", "Vendbanimi", "Etnia"]
