@@ -47,8 +47,37 @@ st.markdown("""
 /* Keep sidebar header + widgets */
 [data-testid="stSidebarNav"] {
     padding-bottom: 0 !important;
-}
+}    
 
+.card {
+    width: 100%;
+    min-height: 185px;
+    padding: 15px 20px;
+    border-radius: 12px;
+    background-color: #ffffff;
+    border: 1px solid #e6e6e6;
+    box-shadow: 0 1px 3px rgba(0,0,0,0.07);
+    margin-bottom: 10px;
+    }
+.card-title {
+    font-size: 18px;
+    font-weight: 600;
+    color: #344b77;
+    margin-bottom: 8px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    }
+.card-title svg {
+    width: 20px;
+    height: 20px;
+    }
+.card-value {
+    font-size: 16px;
+    color: #000000;
+    margin-bottom: 4px;
+    }         
+            
 </style>
 """, unsafe_allow_html=True)
 
@@ -1681,7 +1710,7 @@ n_total = st.sidebar.number_input(
     "Numri total i mostrës (N)",
     min_value=1,
     value=1065,
-    step=10
+    step=100
 )
 
 # Primary stratification
@@ -1997,6 +2026,24 @@ if run_button:
         st.error("Popullsia totale pas filtrave është 0. Nuk mund të alokohet mostra.")
         st.stop()
 
+    # =====================
+    #  Margin of Error (95%)
+    # =====================
+
+    z = 1.96           # 95% confidence
+    p = 0.5            # worst-case scenario
+    n = n_total
+    N = total_pop      # from grouped Pop_stratum sum
+
+    if N > n:
+        fpc = ((N - n) / (N - 1)) ** 0.5
+    else:
+        fpc = 1.0
+
+    moe = z * ((p * (1 - p)) / n) ** 0.5 * fpc
+    moe_percent = moe * 100
+
+
     all_os = []
 
     for var, entries in oversample_inputs.items():
@@ -2260,42 +2307,90 @@ if run_button:
     # Safety: ensure global total matches n_total
     global_total = int(pivot.loc["Total", "Total"])
 
-    st.subheader("Tabela e ndarjes së mostrës")
-
     # Përgatit tekstin për grupmoshën
     if max_age is None:
-        age_text = f"Grupmosha: **{min_age}+**"
+        age_text = f"{min_age}+"
     else:
-        age_text = f"Grupmosha: **{min_age}–{max_age}**"
+        age_text = f"{min_age}–{max_age}"
 
     # Përgatit tekstin për gjininë
     if len(gender_selected) == 1:
-        gender_text = f"Gjinia: **{gender_selected[0]}**"
+        gender_text = f"{gender_selected[0]}"
     else:
-        gender_text = ""
+        gender_text = "Femra, Meshkuj"
 
     if len(settlement_filter) == 1:
-        settlement_text = f"Vendbanimi: **{settlement_filter[0]}**"
+        settlement_text = f"{settlement_filter[0]}"
     else:
-        settlement_text = ""
+        settlement_text = "Urban, Rural"
+
+    if len(eth_filter) == 1 or len(eth_filter) == 2:
+        ethnicity_text = ", ".join(eth_filter)
+    else:
+        ethnicity_text = "Shqiptar, Serb, Tjerë"
+
+    if oversample_enabled:
+        oversampling_text = ", ".join(oversample_vars)
+    else:
+        oversampling_text = "Joaktiv"
 
 
-    # Linja kryesore
-    caption_main = (
-        f"Ndarja kryesore: **{primary_level}** | "
-        f"Nën-ndarja: **{', '.join(sub_options) if sub_options else 'Asnjë'}** | "
-        f"Totali i mostrës: **{n_total}** | "
-        f"Totali i alokuar: **{global_total}**"
-    )
+    # ============================
+    # 3 CARDS UI
+    # ============================
+    def load_svg(path):
+        with open(path, "r", encoding="utf-8") as f:
+            return f.read()
 
-    # Linja shtesë për filtrat demografikë
-    caption_extra = " | ".join(filter(None, [age_text, gender_text, settlement_text]))
+    icon_sample = load_svg("images/sample-people.svg")
+    icon_strata = load_svg("images/strata.svg")
+    icon_demo = load_svg("images/demographics.svg")
 
-    # Shfaq të dyja linjat
-    st.caption(caption_main)
-    if caption_extra:
-        st.caption(caption_extra)
+    col1, col2, col3 = st.columns(3)
 
+    with col1:
+        with st.container():
+            st.markdown(f"""
+            <div class='card'>
+                <div class='card-title'>
+                    {icon_sample} Mostra
+                </div>
+                <div class='card-value'>Totali i mostrës: <b>{n_total}</b></div>
+                <div class='card-value'>Marzha e gabimit: <b>± {moe_percent:.2f}%</b></div>
+                <div class='card-value'>Intervali i besimit: <b>95%</b></div>
+            </div>
+            """, unsafe_allow_html=True)
+
+    with col2:
+        with st.container():
+            st.markdown(f"""
+            <div class='card'>
+                <div class='card-title'>
+                        {icon_strata} Dizajnimi i Mostrës
+                    </div>
+                <div class='card-value'>Ndarja kryesore: <b>{primary_level}</b></div>
+                <div class='card-value'>Nën-ndarja: <b>{", ".join(sub_options)}</b></div>
+                <div class='card-value'>Oversampling: <b>{oversampling_text}</b></div>
+                <div class='card-value'><b></b></div>
+            </div>
+            """, unsafe_allow_html=True)
+
+    with col3:
+        with st.container():
+            st.markdown(f"""
+            <div class='card'>
+                <div class='card-title'>
+                        {icon_demo} Demografia
+                </div>
+                <div class='card-value'>Grupmosha: <b>{age_text}</b></div>
+                <div class='card-value'>Gjinia: <b>{gender_text}</b></div>
+                <div class='card-value'>Vendbanimi: <b>{settlement_text}</b></div>
+                <div class='card-value'>Etnia: <b>{ethnicity_text}</b></div>
+            </div>
+            """, unsafe_allow_html=True)
+
+    st.subheader("Tabela e ndarjes së mostrës")
+    
     st.dataframe(pivot, use_container_width=True)
 
     if global_total != n_total:

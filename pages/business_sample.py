@@ -156,6 +156,34 @@ st.markdown("""
 [data-testid="stSidebarNav"] {
     padding-bottom: 0 !important;
 }
+            
+.card {
+    width: 100%;
+    padding: 15px 20px;
+    border-radius: 12px;
+    background-color: #ffffff;
+    border: 1px solid #e6e6e6;
+    box-shadow: 0 1px 3px rgba(0,0,0,0.07);
+    margin-bottom: 10px;
+    }
+.card-title {
+    font-size: 18px;
+    font-weight: 600;
+    color: #344b77;
+    margin-bottom: 8px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    }
+.card-title svg {
+    width: 20px;
+    height: 20px;
+    }
+.card-value {
+    font-size: 16px;
+    color: #000000;
+    margin-bottom: 4px;
+    }   
 
 </style>
 """, unsafe_allow_html=True)
@@ -166,7 +194,7 @@ st.title("Dizajnimi i Mostrës për Biznese")
 # LOAD BUSINESS DATA
 # =====================================================
 
-@st.cache_data
+@st.cache_data(show_spinner="Duke ngarkuar të dhënat e bizneseve...")
 def load_business_data(path: str) -> pd.DataFrame:
     df = pd.read_excel(path)
 
@@ -204,8 +232,8 @@ st.sidebar.header("Parametrat kryesorë")
 n_total = st.sidebar.number_input(
     "Numri total i intervistave",
     min_value=1,
-    value=100,
-    step=10
+    value=500,
+    step=100
 )
 
 available_strata = [
@@ -407,6 +435,25 @@ if run_button:
 
     total_pop = grouped["Pop_stratum"].sum()
 
+    # =====================================================
+    # CALCULATE MARGIN OF ERROR (95% confidence)
+    # =====================================================
+
+    z = 1.96        # z-score for 95% CI
+    p = 0.5         # worst-case proportion
+    n = n_total     # desired sample size
+    Npop = total_pop   # population size after filters
+
+    # Finite Population Correction
+    if Npop > n:
+        fpc = np.sqrt((Npop - n) / (Npop - 1))
+    else:
+        fpc = 1.0
+
+    moe = z * np.sqrt((p * (1 - p)) / n) * fpc
+    moe_percent = moe * 100
+
+
     grouped["n_alloc"] = 0
     seed = 42
 
@@ -455,6 +502,53 @@ if run_button:
             grouped.loc[mask_rest, "n_alloc"] += alloc
 
     total_alloc = grouped["n_alloc"].sum()
+
+    if selected_filters:
+        filters_text = ", ".join(selected_filters)
+    else:
+        filters_text = "Asnjë"
+
+    strata_text = ", ".join(strata_vars)
+
+    if oversample_enabled:
+        oversampling_text = ", ".join(oversample_var)
+    else:
+        oversampling_text = "Joaktiv"
+
+    def load_svg(path):
+        with open(path, "r", encoding="utf-8") as f:
+            return f.read()
+
+    icon_sample = load_svg("images/sample-business.svg")
+    icon_strata = load_svg("images/strata.svg")
+
+    col1, col2 = st.columns(2)
+
+    with col1:
+        with st.container():
+            st.markdown(f"""
+            <div class='card'>
+                <div class='card-title'>
+                    {icon_sample} Mostra
+                </div>
+                <div class='card-value'>Totali i mostrës: <b>{n_total}</b></div>
+                <div class='card-value'>Marzha e gabimit: <b>± {moe_percent:.2f}%</b></div>
+                <div class='card-value'>Intervali i besimit: <b>95%</b></div>
+            </div>
+            """, unsafe_allow_html=True)
+
+    with col2:
+        with st.container():
+            st.markdown(f"""
+            <div class='card'>
+                <div class='card-title'>
+                        {icon_strata} Ndarja e mostrës
+                </div>
+                <div class='card-value'>Ndarja sipas: <b>{strata_text}</b></div>
+                <div class='card-value'>Filtrimi sipas: <b>{filters_text}</b></div>
+                <div class='card-value'>Oversampling: <b>{oversampling_text}</b></div>
+            </div>
+            """, unsafe_allow_html=True)
 
     st.subheader("Tabela e ndarjes së mostrës")
     df_final = grouped[grouped["n_alloc"] > 0].copy()

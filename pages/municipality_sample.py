@@ -52,6 +52,34 @@ st.markdown("""
 [data-testid="stSidebarNav"] {
     padding-bottom: 0 !important;
 }
+            
+.card {
+    width: 100%;
+    padding: 15px 20px;
+    border-radius: 12px;
+    background-color: #ffffff;
+    border: 1px solid #e6e6e6;
+    box-shadow: 0 1px 3px rgba(0,0,0,0.07);
+    margin-bottom: 10px;
+    }
+.card-title {
+    font-size: 18px;
+    font-weight: 600;
+    color: #344b77;
+    margin-bottom: 8px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    }
+.card-title svg {
+    width: 20px;
+    height: 20px;
+    }
+.card-value {
+    font-size: 16px;
+    color: #000000;
+    margin-bottom: 4px;
+    }   
 
 </style>
 """, unsafe_allow_html=True)
@@ -905,7 +933,7 @@ N = st.sidebar.number_input(
     "Numri i mostrës për komunen",
     min_value=6,
     value=800,
-    step=2
+    step=100
 )
 
 data_collection_method = st.sidebar.selectbox(
@@ -982,6 +1010,24 @@ if run:
         st.stop()
 
     # =====================================================
+    # CALCULATE MARGIN OF ERROR FOR THE MUNICIPALITY
+    # =====================================================
+
+    z = 1.96    # 95% confidence
+    p = 0.5     # worst-case proportion
+    n = N       # sample size for municipality
+    Npop = total_pop
+
+    if Npop > n:
+        fpc = ((Npop - n) / (Npop - 1)) ** 0.5   # finite population correction
+    else:
+        fpc = 1.0
+
+    moe = z * ((p * (1 - p)) / n) ** 0.5 * fpc
+    moe_percent = moe * 100
+
+
+    # =====================================================
     # 1) Allocate N into Urban & Rural proportionally
     # =====================================================
 
@@ -1009,6 +1055,14 @@ if run:
 
     def distribute_rural(df_rural, rural_n):
         df_rural = df_rural.copy()
+
+        # EXCEPTION: For Junik → no minimum threshold required
+        if komuna == "Junik":
+            weights = df_rural["PopFilt"] / df_rural["PopFilt"].sum()
+            floats = weights * rural_n
+            alloc = controlled_rounding(floats, rural_n)
+            df_rural["Intervista"] = alloc
+            return df_rural
 
         while True:
             weights = df_rural["PopFilt"] / df_rural["PopFilt"].sum()
@@ -1061,14 +1115,54 @@ if run:
         age_text = f"{min_age}+"
     else:
         age_text = f"{min_age}–{max_age}"
+    
+    # Përgatit tekstin për gjininë
+    if len(gender_selected) == 1:
+        gender_text = f"{gender_selected[0]}"
+    else:
+        gender_text = "Femra, Meshkuj"
 
-    caption_main = (
-        f"Totali i mostrës: **{N}** | "
-        f"Totali i alokuar: **{global_total}** | "
-        f"Grupmosha: **{age_text}**"
-    )
+    if len(eth_filter) == 1 or len(eth_filter) == 2:
+        ethnicity_text = ", ".join(eth_filter)
+    else:
+        ethnicity_text = "Shqiptar, Serb, Tjerë"
 
-    st.caption(caption_main)
+    def load_svg(path):
+        with open(path, "r", encoding="utf-8") as f:
+            return f.read()
+
+    icon_sample = load_svg("images/sample-people.svg")
+    icon_strata = load_svg("images/strata.svg")
+    icon_demo = load_svg("images/demographics.svg")
+
+
+    col1, col2 = st.columns(2)
+
+    with col1:
+        with st.container():
+            st.markdown(f"""
+            <div class='card'>
+                <div class='card-title'>
+                    {icon_sample} Mostra
+                </div>
+                <div class='card-value'>Totali i mostrës: <b>{N}</b></div>
+                <div class='card-value'>Marzha e gabimit: <b>± {moe_percent:.2f}%</b></div>
+                <div class='card-value'>Intervali i besimit: <b>95%</b></div>
+            </div>
+            """, unsafe_allow_html=True)
+
+    with col2:
+        with st.container():
+            st.markdown(f"""
+            <div class='card'>
+                <div class='card-title'>
+                        {icon_demo} Demografia
+                </div>
+                <div class='card-value'>Grupmosha: <b>{age_text}</b></div>
+                <div class='card-value'>Gjinia: <b>{gender_text}</b></div>
+                <div class='card-value'>Etnia: <b>{ethnicity_text}</b></div>
+            </div>
+            """, unsafe_allow_html=True)
 
     st.subheader("Tabela e ndarjes së mostrës brenda komunës")
     st.dataframe(sample, use_container_width=True)
