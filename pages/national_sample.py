@@ -1,11 +1,13 @@
 import streamlit as st
 import pandas as pd
-import numpy as np
-import re
-from docx import Document
-from io import BytesIO
 import base64
 import pydeck as pdk
+import pandas as pd
+import numpy as np
+import streamlit as st
+import base64
+from io import BytesIO
+from docx import Document
 
 st.markdown("""
     <div style='width: 100%; padding: 20px 30px; background: #ffffff;
@@ -207,7 +209,6 @@ def load_gender_age_data(path: str) -> pd.DataFrame:
     # Remove empty rows (if any)
     df = df.dropna(subset=["Komuna", "Gjinia"])
     return df, age_cols
-
 
 def get_region_mapping() -> dict:
     """

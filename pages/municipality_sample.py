@@ -1,5 +1,9 @@
 import streamlit as st
-import uuid
+import base64
+import pandas as pd
+import numpy as np
+import pydeck as pdk
+
 # =====================================================
 # PAGE SETTINGS & HEADER
 # =====================================================
@@ -8,14 +12,6 @@ st.set_page_config(
     page_title="Mostra sipas Komunës",
     layout="wide"
 )
-
-import pandas as pd
-import numpy as np
-import pydeck as pdk
-
-from pages.national_sample import (compute_filtered_pop_for_psu_row, controlled_rounding, load_psu_data, df_to_excel_bytes, 
-                                   create_download_link, create_download_link2, compute_population_coefficients, add_codes_to_coef_df, df_eth, df_ga, region_map)
-
 
 st.markdown("""
     <div style='width: 100%; padding: 20px 30px; background: #ffffff;
@@ -59,6 +55,708 @@ st.markdown("""
 
 </style>
 """, unsafe_allow_html=True)
+
+@st.cache_data
+def load_ethnicity_settlement_data(path: str) -> pd.DataFrame:
+    """
+    Load ASK-2024-Komuna-Etnia-Vendbanimi.xlsx
+    Expected structure:
+    Komuna | Vendbanimi | Shqiptar | Tjerë | Serb | ...
+    Convert to long format: one row per (Komuna, Vendbanimi, Etnia).
+    """
+    df = pd.read_excel(path, sheet_name=0)
+    # Identify ethnicity columns (all non-id cols except Komuna, Vendbanimi)
+    id_cols = ["Komuna", "Vendbanimi"]
+    eth_cols = [c for c in df.columns if c not in id_cols]
+    df_long = df.melt(
+        id_vars=id_cols,
+        value_vars=eth_cols,
+        var_name="Etnia",
+        value_name="Pop_base"
+    )
+    # Clean
+    df_long["Etnia"] = df_long["Etnia"].str.strip()
+    df_long["Vendbanimi"] = df_long["Vendbanimi"].str.strip()
+    df_long["Komuna"] = df_long["Komuna"].str.strip()
+    df_long["Pop_base"] = df_long["Pop_base"].fillna(0).astype(float)
+    return df_long
+
+
+@st.cache_data
+def load_gender_age_data(path: str) -> pd.DataFrame:
+    """
+    Load ASK-2024-Komuna-Gjinia-Mosha.xlsx (sheet 'census_00').
+    Expected structure:
+    Komuna | Gjinia | 0 | 1 | 2 | ... | (age columns)
+    """
+    df = pd.read_excel(path, sheet_name="census_00")
+    # Normalize names
+    df["Komuna"] = df["Komuna"].astype(str).str.strip()
+    df["Gjinia"] = df["Gjinia"].astype(str).str.strip()
+
+    # Keep only age columns that are pure ints as strings, e.g. "0","1",...
+    age_cols = []
+    for c in df.columns:
+        s = str(c).strip()
+        if s.isdigit():
+            age_cols.append(c)
+
+    # Remove empty rows (if any)
+    df = df.dropna(subset=["Komuna", "Gjinia"])
+    return df, age_cols
+
+
+def get_region_mapping() -> dict:
+    """
+    Map Komuna -> Regjion (bazuar në ASK)
+    """
+    region_map = {
+        "Deçan": "Gjakovë",
+        "Dragash": "Prizren",
+        "Ferizaj": "Ferizaj",
+        "Fushë Kosovë": "Prishtinë",
+        "Gjakovë": "Gjakovë",
+        "Gjilan": "Gjilan",
+        "Gllogoc": "Prishtinë",
+        "Graçanicë": "Prishtinë",
+        "Han i Elezit": "Ferizaj",
+        "Istog": "Pejë",
+        "Junik": "Gjakovë",
+        "Kaçanik": "Ferizaj",
+        "Kamenicë": "Gjilan",
+        "Klinë": "Pejë",
+        "Kllokot": "Gjilan",
+        "Leposavic": "Mitrovicë",
+        "Lipjan": "Prishtinë",
+        "Malishevë": "Prizren",
+        "Mamushë": "Prizren",
+        "Mitrovicë": "Mitrovicë",
+        "Mitrovica Veriore": "Mitrovicë",
+        "Novobërdë": "Gjilan",
+        "Obiliq": "Prishtinë",
+        "Partesh": "Gjilan",
+        "Pejë": "Pejë",
+        "Podujevë": "Prishtinë",
+        "Prishtinë": "Prishtinë",
+        "Prizren": "Prizren",
+        "Rahovec": "Gjakovë",
+        "Ranillug": "Gjilan",
+        "Shtërpcë": "Ferizaj",
+        "Shtime": "Ferizaj",
+        "Skënderaj": "Mitrovicë",
+        "Suharekë": "Prizren",
+        "Viti": "Gjilan",
+        "Vushtrri": "Mitrovicë",
+        "Zubin Potok": "Mitrovicë",
+        "Zvecan": "Mitrovicë"
+    }
+    return region_map
+
+def controlled_rounding(values: np.ndarray,
+                        total_n: int,
+                        seed: int = 42) -> np.ndarray:
+    """
+    Controlled rounding:
+    - Start from float allocations
+    - Floor all
+    - Distribute remaining units based on fractional parts (probabilistic)
+    - Sum-preserving & reproducible via seed
+    """
+    vals = np.asarray(values, dtype=float)
+    if len(vals) == 0:
+        return vals.astype(int)
+
+    floors = np.floor(vals).astype(int)
+    diff = int(total_n - floors.sum())
+
+    if diff == 0:
+        return floors
+
+    fracs = vals - floors
+
+    rng = np.random.default_rng(seed)
+
+    if diff > 0:
+        # Distribute +1 to 'diff' positions, weighted by fractional parts
+        if fracs.sum() == 0:
+            # if all fracs = 0, choose random indices uniformly
+            indices = rng.choice(len(vals), size=diff, replace=False)
+        else:
+            probs = fracs / fracs.sum()
+            indices = rng.choice(len(vals), size=diff, replace=False, p=probs)
+        floors[indices] += 1
+
+    elif diff < 0:
+        # Too many after floor (rare, due to numeric issues).
+        # Remove -diff units from smallest fractional parts.
+        diff = -diff
+        # Positions with smallest fracs get -1
+        order = np.argsort(fracs)  # ascending
+        indices = order[:diff]
+        floors[indices] -= 1
+
+    # Safety adjust if still off by 1 from numeric edge cases
+    final_diff = int(total_n - floors.sum())
+    if final_diff != 0 and len(vals) > 0:
+        idx = rng.integers(0, len(vals))
+        floors[idx] += final_diff
+
+    return floors
+
+@st.cache_data
+def load_psu_data(path: str) -> pd.DataFrame:
+    df = pd.read_excel(path)
+    # Normalizim minimal
+    df["Komuna"] = df["Komuna"].astype(str).str.strip()
+    df["Vendbanimi"] = df["Vendbanimi"].astype(str).str.strip()
+    df["Fshati/Qyteti"] = df["Fshati/Qyteti"].astype(str).str.strip()
+    df["Quadrant"] = df["Quadrant"].astype(str).str.strip()
+
+    # Etnitë kryesore
+    for col in ["Shqiptar", "Serb"]:
+        if col not in df.columns:
+            df[col] = 0.0
+        df[col] = df[col].fillna(0).astype(float)
+
+    other_cols = [
+        "Boshnjak", "Turk", "Rom", "Ashkali", "Egjiptian",
+        "Goran", "Të tjerë", "Preferoj të mos përgjigjem"
+    ]
+    for col in other_cols:
+        if col not in df.columns:
+            df[col] = 0.0
+        df[col] = df[col].fillna(0).astype(float)
+
+    df["Tjeter_pop"] = df[other_cols].sum(axis=1)
+
+    return df
+
+def compute_filtered_pop_for_psu_row(
+    psu_row: pd.Series,
+    age_min: int,
+    age_max: int | None,
+    gender_selected: list[str],
+    eth_filter: list[str]
+) -> float:
+    """
+    Compute population for one PSU using demographic filters.
+    Fully safe: no division by zero, respects gender/age/eth filters.
+    """
+
+    import re
+
+    # -------------------------------------------------------
+    # 1. Handle age max
+    # -------------------------------------------------------
+    if age_max is None:
+        age_max = 120  # large value = include all
+
+    # -------------------------------------------------------
+    # 2. Identify all PSU age group columns
+    # -------------------------------------------------------
+    age_cols = []
+    for col in psu_row.index:
+        name = str(col).strip()
+        # match formats like '0-4', '5-9', '65+', etc.
+        if re.fullmatch(r"\d+\-\d+", name) or re.fullmatch(r"\d+\+", name):
+            age_cols.append(col)
+
+    # Helper to decode age range
+    def group_range(col_name):
+        if "+" in col_name:
+            base = int(col_name.replace("+", ""))
+            return (base, 200)
+        lo, hi = col_name.split("-")
+        return (int(lo), int(hi))
+
+    # -------------------------------------------------------
+    # 3. AGE FILTER (fractional overlap)
+    # -------------------------------------------------------
+    pop_age = 0
+    for col in age_cols:
+        lo, hi = group_range(col)
+        group_pop = psu_row[col]
+
+        if group_pop <= 0:
+            continue
+
+        # overlap between age group and filter
+        overlap_lo = max(lo, age_min)
+        overlap_hi = min(hi, age_max)
+
+        if overlap_lo > overlap_hi:
+            continue  # no overlap
+
+        group_size = hi - lo + 1
+        overlap_size = overlap_hi - overlap_lo + 1
+
+        fraction = overlap_size / group_size
+
+        pop_age += group_pop * fraction
+
+    # If no ages match → return 0
+    if pop_age <= 0:
+        return 0
+
+    # -------------------------------------------------------
+    # 4. GENDER FILTER (SAFE)
+    # -------------------------------------------------------
+    male = psu_row.get("Meshkuj", 0)
+    female = psu_row.get("Femra", 0)
+
+    if "Meshkuj" not in gender_selected:
+        male = 0
+    if "Femra" not in gender_selected:
+        female = 0
+
+    total_gender_pop = male + female
+
+    if total_gender_pop <= 0:
+        return 0
+
+    # Proportion from allowed genders
+    gender_fraction = total_gender_pop / (psu_row.get("Meshkuj", 0) + psu_row.get("Femra", 0)
+                                          if (psu_row.get("Meshkuj", 0) + psu_row.get("Femra", 0)) > 0
+                                          else total_gender_pop)
+
+    # -------------------------------------------------------
+    # 5. ETHNICITY FILTER (SAFE)
+    # -------------------------------------------------------
+    eth_total = 0
+    eth_selected = 0
+
+    all_ethnic_cols = [
+        "Shqiptar", "Serb", "Boshnjak", "Turk", "Rom",
+        "Ashkali", "Egjiptian", "Goran", "Të tjerë",
+        "Preferoj të mos përgjigjem"
+    ]
+
+    for eth in all_ethnic_cols:
+        eth_total += psu_row.get(eth, 0)
+
+    for eth in eth_filter:
+        eth_selected += psu_row.get(eth, 0)
+
+    # SAFE division
+    if eth_total > 0:
+        eth_fraction = eth_selected / eth_total
+    else:
+        eth_fraction = 0
+
+    if eth_fraction <= 0:
+        return 0
+
+    # -------------------------------------------------------
+    # 6. Combine all three filters (age × gender × ethnicity)
+    # -------------------------------------------------------
+    final_pop = pop_age * (total_gender_pop / (male + female) if (male + female) > 0 else 1)
+    final_pop *= eth_fraction
+
+    return max(final_pop, 0)
+
+def df_to_excel_bytes(df: pd.DataFrame, sheet_name: str = "Data") -> bytes:
+        from io import BytesIO
+        output = BytesIO()
+        with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
+            df.to_excel(writer, index=True, sheet_name=sheet_name)
+        return output.getvalue()
+
+def create_download_link(file_bytes: bytes, filename: str, label: str):
+    """Create full-width HTML download button (without rerun)."""
+    b64 = base64.b64encode(file_bytes).decode()
+    button_html = f"""<a href="data:application/octet-stream;base64,{b64}" download="{filename}" style="text-decoration:none;">
+                <div style="
+                    background-color:#344b77;
+                    color:white;
+                    text-align:center;
+                    font-weight:500;
+                    font-size:16px;
+                    padding:10px;
+                    border-radius:8px;
+                    margin-top:8px;
+                    width:100%;
+                    box-sizing:border-box;
+                    cursor:pointer;
+                ">
+                {label}
+                </div>
+            </a>
+        """
+    st.markdown(button_html, unsafe_allow_html=True)
+
+def create_download_link2(file_bytes: bytes, filename: str, label: str):
+    """Create full-width HTML download button (without rerun)."""
+    b64 = base64.b64encode(file_bytes).decode()
+    button_html = f"""<a href="data:application/octet-stream;base64,{b64}" download="{filename}" style="text-decoration:none;">
+                <div style="
+                    background-color:#5b8fb8;
+                    color:white;
+                    text-align:center;
+                    font-weight:500;
+                    font-size:16px;
+                    padding:10px;
+                    border-radius:8px;
+                    margin-top:8px;
+                    width:100%;
+                    box-sizing:border-box;
+                    cursor:pointer;
+                ">
+                {label}
+                </div>
+            </a>
+        """
+    st.markdown(button_html, unsafe_allow_html=True)
+
+def compute_population_coefficients(
+    df_ga,
+    df_eth,
+    region_map,
+    gender_selected,
+    min_age,
+    max_age,
+    eth_filter,
+    settlement_filter,
+    komuna_filter,
+    data_collection_method
+):
+    """
+    Kthen koeficientët e popullsisë pas filtrave për:
+    - Komunë
+    - Regjion
+    - Gjinia
+    - Grupmosha
+    - Vendbanimi
+    - Etnia
+    Vetëm nëse dimensioni ka ≥ 2 kategori me pop > 0.
+    """
+
+    out = []
+
+    # ---------------------------------------------------
+    # Prepare df_eth and df_ga based on filters
+    # ---------------------------------------------------
+    df_pop = df_eth.copy()
+    df_pop = df_pop[df_pop["Etnia"].isin(eth_filter)]
+    df_pop = df_pop[df_pop["Vendbanimi"].isin(settlement_filter)]
+    df_pop = df_pop[df_pop["Komuna"].isin(komuna_filter)]
+
+    if df_pop.empty:
+        return pd.DataFrame()
+
+    # df_ga
+    df_age = df_ga[df_ga["Komuna"].isin(komuna_filter)]
+    df_age = df_age[df_age["Gjinia"].isin(gender_selected)]
+
+    if df_age.empty:
+        return pd.DataFrame()
+
+    # Age columns
+    age_cols = [c for c in df_age.columns if str(c).isdigit()]
+
+    # max_age automatic for CAWI
+    if data_collection_method == "CAWI" and max_age is None:
+        max_age = 120
+
+    if max_age is None:
+        max_age = max(map(int, age_cols))
+
+    # Filter age columns
+    age_mask_cols = [c for c in age_cols if min_age <= int(c) <= max_age]
+
+    df_age["Pop_age"] = df_age[age_mask_cols].sum(axis=1)
+
+    # ---------------------------------------------------
+    # Helper to add dimension blocks safely
+    # ---------------------------------------------------
+    def append_block(dim, pop_series):
+        """
+        Adds dimension only if ≥2 categories AND total pop > 0.
+        Removes categories with Pop=0 before checking.
+        """
+        # Remove categories with zero population
+        pop_series = pop_series[pop_series > 0]
+
+        if len(pop_series) < 2:
+            return  # ← SKIP dimension
+
+        total = pop_series.sum()
+        if total == 0:
+            return  # ← Prevent ZeroDivisionError
+
+        coef_series = pop_series / total
+
+        for cat, pop in pop_series.items():
+            out.append({
+                "Dimensioni": dim,
+                "Kategoria": cat,
+                "Populacioni": pop,
+                "Pesha": float(coef_series[cat])
+            })
+
+    # ---------------------------------------------------
+    # 1) Komuna
+    # ---------------------------------------------------
+    pop_kom = df_pop.groupby("Komuna")["Pop_base"].sum()
+    append_block("Komuna", pop_kom)
+
+    # ---------------------------------------------------
+    # 2) Regjion
+    # ---------------------------------------------------
+    df_pop["Regjion"] = df_pop["Komuna"].map(region_map)
+    pop_reg = df_pop.groupby("Regjion")["Pop_base"].sum()
+    append_block("Regjion", pop_reg)
+
+    # ---------------------------------------------------
+    # 3) Etnia
+    # ---------------------------------------------------
+    pop_eth = df_pop.groupby("Etnia")["Pop_base"].sum()
+    append_block("Etnia", pop_eth)
+
+    # ---------------------------------------------------
+    # 4) Vendbanimi
+    # ---------------------------------------------------
+    pop_vb = df_pop.groupby("Vendbanimi")["Pop_base"].sum()
+    append_block("Vendbanimi", pop_vb)
+
+    # ---------------------------------------------------
+    # 5) Gjinia
+    # ---------------------------------------------------
+    pop_gender = df_age.groupby("Gjinia")["Pop_age"].sum()
+    append_block("Gjinia", pop_gender)
+
+    # ---------------------------------------------------
+    # 6) Grupmoshat (dynamic bins)
+    # ---------------------------------------------------
+    merged_bins, labels = create_dynamic_age_groups(min_age, max_age, data_collection_method)
+
+    # -----------------------------
+    # 6) Grupmoshat me etiketa të pastra (18-24, 25-34, 65+)
+    # -----------------------------
+
+    merged_bins, labels = create_dynamic_age_groups(min_age, max_age, data_collection_method)
+
+    long_age = []
+
+    for _, row in df_age.iterrows():
+        for col in age_mask_cols:
+            age = int(col)
+            pop = row[col]
+
+            # Gjej bin për këtë moshë
+            for idx, (lo, hi) in enumerate(merged_bins):
+                if lo <= age <= hi:
+                    # Përgatisim formatimin e etiketës
+                    if hi >= 85 and data_collection_method!="CAWI":
+                        label = f"{lo}+"
+                    elif hi >= 65 and data_collection_method=="CAWI":
+                        label = f"{lo}+"
+                    else:
+                        label = f"{lo}-{hi}"
+                    long_age.append((label, pop))
+                    break
+
+    if long_age:
+        df_age_long = pd.DataFrame(long_age, columns=["Age_group", "Count"])
+        pop_age_grp = df_age_long.groupby("Age_group")["Count"].sum()
+
+        # Ruaj rendin sipas moshës (p.sh. 18-24 → 25-34 → ... → 65+)
+        ordered = sorted(pop_age_grp.index, key=lambda s: int(s.split("-")[0].replace("+","")))
+        pop_age_grp = pop_age_grp[ordered]
+
+        append_block("Grupmosha", pop_age_grp)
+
+
+    # ---------------------------------------------------
+    # Return final result
+    # ---------------------------------------------------
+    return pd.DataFrame(out)
+
+def add_codes_to_coef_df(coef_df, data_collection_method):
+    """
+    Shton kolonën 'Kodi' në coef_df.
+    - Të gjitha dimensionet marrin kodet fikse (si më parë)
+    - Vetëm Grupmosha merr kodim dinamik sipas renditjes së saj reale (pas filtrimit)
+    """
+
+    # ======================
+    # 1. Kodet fikse
+    # ======================
+
+    komuna_codes = {
+        "Prishtinë":1, "Deçan":2, "Dragash":3, "Ferizaj":4, "Fushë Kosovë":5, 
+        "Gjakovë":6, "Gjilan":7, "Gllogoc":8, "Graçanicë":9, "Han i Elezit":10,
+        "Istog":11, "Junik":12, "Kaçanik":13, "Kamenicë":14, "Klinë":15,
+        "Kllokot":16, "Leposaviq":17, "Leposavic":17, "Lipjan":18, 
+        "Malishevë":19, "Mamushë":20, "Mitrovicë":21, "Mitrovica Veriore":22,
+        "Novobërdë":23, "Obiliq":24, "Partesh":25, "Pejë":26, "Podujevë":27,
+        "Prizren":28, "Rahovec":29, "Ranillug":30, "Skënderaj":31,
+        "Suharekë":32, "Shtërpcë":33, "Shtime":34, "Viti":35, "Vushtrri":36,
+        "Zubin Potok":37, "Zvecan":38
+    }
+
+    region_codes = {
+        "Prishtinë":1, "Mitrovicë":2, "Pejë":3, "Prizren":4,
+        "Ferizaj":5, "Gjilan":6, "Gjakovë":7
+    }
+
+    vb_codes = {"Urban":1, "Rural":2}
+    gender_codes = {"Femra":1, "Femer":1, "Mashkull":2, "Meshkuj":2}
+    eth_codes = {"Shqiptar":1, "Serb":2, "Tjerë":3, "Tjeter":3}
+
+    # ==========================
+    # 2. Fillimisht vendos kodet fikse
+    # ==========================
+
+    def get_fixed_code(row):
+        dim = row["Dimensioni"]
+        cat = row["Kategoria"]
+
+        if dim == "Komuna": return komuna_codes.get(cat)
+        if dim == "Regjion": return region_codes.get(cat)
+        if dim == "Vendbanimi": return vb_codes.get(cat)
+        if dim == "Gjinia": return gender_codes.get(cat)
+        if dim == "Etnia": return eth_codes.get(cat)
+
+        # Grupmosha KALO HETU – do mbushet më vonë dinamikisht
+        return None
+
+    coef_df["Kodi"] = coef_df.apply(get_fixed_code, axis=1)
+
+    # ==========================
+    # 3. KODIMI DINAMIK I GRUPMOSHËS
+    # ==========================
+
+    df_age = coef_df[coef_df["Dimensioni"] == "Grupmosha"].copy()
+
+    if not df_age.empty:
+
+        # (a) Parsimi i vlerave të moshës në numra
+        parsed = []
+        for g in df_age["Kategoria"]:
+            g = str(g)
+
+            if "-" in g:
+                lo, hi = g.split("-")
+                lo, hi = int(lo), int(hi)
+            elif g.endswith("+"):
+                lo = int(g.replace("+", ""))
+                hi = 999
+            else:
+                continue
+
+            parsed.append((g, lo, hi))
+
+        # (b) Rendit grupmoshat sipas moshës
+        parsed_sorted = sorted(parsed, key=lambda x: x[1])
+
+        # (c) Gjenero kodet 1,2,3,... automatikisht
+        dynamic_age_codes = {grp: i+1 for i, (grp, _, _) in enumerate(parsed_sorted)}
+
+        # (d) Mbishkruaj kolonën Kodi *vetëm për Grupmoshën*
+        coef_df.loc[coef_df["Dimensioni"] == "Grupmosha", "Kodi"] = \
+            coef_df.loc[coef_df["Dimensioni"] == "Grupmosha", "Kategoria"].map(dynamic_age_codes)
+
+    return coef_df
+
+def create_dynamic_age_groups(age_min, age_max, data_collection_method):
+    """
+    Krijon grupmosha dinamike kur përdoruesi ka vendosur max_age.
+    Nëse max_age është None → kthen grupmoshat standarde sipas metodës.
+    """
+
+    # -----------------------------------------
+    # CASE A — Nuk ka max_age → përdor standardet
+    # -----------------------------------------
+    if age_max is None:
+        if data_collection_method == "CAWI":
+            base = [(18,24), (25,34), (35,44), (45,54), (55,200)]
+        else:
+            base = [(18,24), (25,34), (35,44), (45,54), (55,64), (65,200)]
+
+        labels = []
+        for lo, hi in base:
+            if hi >= 200:
+                labels.append(f"{lo}+")
+            else:
+                labels.append(f"{lo}-{hi}")
+
+        return base, labels
+
+    # -----------------------------------------
+    # CASE B — Dynamic bins
+    # -----------------------------------------
+    base = [
+        (18,24),
+        (25,34),
+        (35,44),
+        (45,54),
+        (55,64),
+        (65,200)
+    ]
+
+    if data_collection_method == "CAWI":
+        base = [
+            (18,24),
+            (25,34),
+            (35,44),
+            (45,54),
+            (55,200)
+        ]
+
+    hi_age = age_max
+
+    # 1) CLIP bins
+    clipped = []
+    for lo, hi in base:
+        new_lo = max(lo, age_min)
+        new_hi = min(hi, hi_age)
+        if new_lo <= new_hi:
+            clipped.append((new_lo, new_hi))
+
+    # 2) FIX small first bin
+    if len(clipped) >= 2:
+        lo, hi = clipped[0]
+        if (hi - lo + 1) < 5:
+            nlo, nhi = clipped[1]
+            clipped = [(lo, nhi)] + clipped[2:]
+
+    # 3) FIX small middle bins
+    merged = []
+    for lo, hi in clipped:
+        if merged and (hi - lo + 1) < 5:
+            plo, phi = merged[-1]
+            merged[-1] = (plo, hi)
+        else:
+            merged.append((lo, hi))
+
+    # 4) FIX last
+    if len(merged) >= 2:
+        lo, hi = merged[-1]
+        if (hi - lo + 1) < 5:
+            plo, phi = merged[-2]
+            merged[-2] = (plo, hi)
+            merged = merged[:-1]
+
+    # 5) Labels
+    labels = []
+    for lo, hi in merged:
+        if hi >= 200:
+            labels.append(f"{lo}+")
+        else:
+            labels.append(f"{lo}-{hi}")
+
+    return merged, labels
+
+# Load data
+try:
+    df_eth = load_ethnicity_settlement_data("excel-files/ASK-2024-Komuna-Etnia-Vendbanimi.xlsx")
+    df_ga, age_cols = load_gender_age_data("excel-files/ASK-2024-Komuna-Gjinia-Mosha.xlsx")
+except Exception as e:
+    st.error(f"Gabim gjatë leximit të fajllave: {e}")
+    st.stop()
+
+region_map = get_region_mapping()
+
 
 def generate_spss_syntax_municipality(coef_df, data_collection_method, min_age, max_age):
     """
@@ -518,8 +1216,6 @@ if run:
         filename=f"sintaksa_peshat_{komuna}.sps",
         label="Shkarko Peshat për SPSS"
     )
-
-
 
 
 else:
