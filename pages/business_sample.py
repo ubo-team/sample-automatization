@@ -347,13 +347,13 @@ if "Aktivitetet" in selected_filters:
 # FILTER: TIPI I BIZNESIT
 # -----------------------------
 if "Tipi i biznesit" in selected_filters:
-    unique_vals = sorted(df_biz["Tipi_biznesit"].dropna().unique())
+    unique_vals = sorted(df_biz["Tipi i biznesit"].dropna().unique())
     selected_vals = st.sidebar.multiselect(
         "Zgjidh Tipin e Biznesit",
         unique_vals
     )
     if selected_vals:
-        df_filtered = df_filtered[df_filtered["Tipi_biznesit"].isin(selected_vals)]
+        df_filtered = df_filtered[df_filtered["Tipi i biznesit"].isin(selected_vals)]
 
 # -----------------------------
 # FILTER: SEKTORI
