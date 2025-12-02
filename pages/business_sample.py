@@ -203,12 +203,28 @@ def load_business_data(path: str) -> pd.DataFrame:
         df = df[df["Statusi"].astype(str).str.lower() == "aktiv"]
 
     # Clean text columns
-    for c in ["Komuna", "Regjioni", "Sektori", "NACE", "Tipi i biznesit", "Kategoria"]:
+    for c in ["Komuna", "Regjioni", "Sektori", "NACE", "Forma juridike", "Madhësia e biznesit"]:
         if c in df.columns:
             df[c] = df[c].astype(str).str.strip()
 
     return df
 
+# Helper për alokim proporcional në një maskë
+def alloc_to_mask(mask: pd.Series, quota: int) -> pd.Series:
+    out = pd.Series(0.0, index=grouped.index)
+    quota = int(quota)
+    if quota <= 0:
+        return out
+
+    df_sub = grouped[mask].copy()
+    if df_sub.empty:
+        return out
+
+    weights = df_sub["Pop_stratum"] / df_sub["Pop_stratum"].sum()
+    floats = weights * quota
+    ints = controlled_rounding(floats.to_numpy(), quota, seed)
+    out.loc[df_sub.index] = ints
+    return out
 
 try:
     df_biz = load_business_data("excel-files/ARBK-bizneset.xlsx")
@@ -237,7 +253,7 @@ n_total = st.sidebar.number_input(
 )
 
 available_strata = [
-    c for c in ["Regjioni", "Komuna", "Sektori", "NACE", "Tipi i biznesit", "Kategoria"]
+    c for c in ["Regjioni", "Komuna", "Sektori", "NACE", "Forma juridike", "Madhësia e biznesit"]
     if c in df_biz.columns
 ]
 
@@ -268,15 +284,15 @@ st.sidebar.subheader("Filtrimi i bizneseve (opsionale)")
 filter_options = [
     "Regjioni", 
     "Komuna", 
-    "Kategoria", 
+    "Madhësia e biznesit", 
     "NACE", 
     "Aktivitetet",
-    "Tipi i biznesit",
+    "Forma juridike",
     "Sektori"
 ]
 
 selected_filters = st.sidebar.multiselect(
-    "Zgjidh fushat që dëshiron të filtrash",
+    "Zgjidh fushat që dëshiron të filtrosh",
     filter_options
 )
 
@@ -310,14 +326,14 @@ if "Komuna" in selected_filters:
 # -----------------------------
 # FILTER: KATEGORIA
 # -----------------------------
-if "Kategoria" in selected_filters:
-    unique_vals = sorted(df_biz["Kategoria"].dropna().unique())
+if "Madhësia e biznesit" in selected_filters:
+    unique_vals = sorted(df_biz["Madhësia e biznesit"].dropna().unique())
     selected_vals = st.sidebar.multiselect(
         "Zgjidh Kategorinë",
         unique_vals
     )
     if selected_vals:
-        df_filtered = df_filtered[df_filtered["Kategoria"].isin(selected_vals)]
+        df_filtered = df_filtered[df_filtered["Madhësia e biznesit"].isin(selected_vals)]
 
 # -----------------------------
 # FILTER: NACE
@@ -346,14 +362,14 @@ if "Aktivitetet" in selected_filters:
 # -----------------------------
 # FILTER: TIPI I BIZNESIT
 # -----------------------------
-if "Tipi i biznesit" in selected_filters:
-    unique_vals = sorted(df_biz["Tipi i biznesit"].dropna().unique())
+if "Forma juridike" in selected_filters:
+    unique_vals = sorted(df_biz["Forma juridike"].dropna().unique())
     selected_vals = st.sidebar.multiselect(
-        "Zgjidh Tipin e Biznesit",
+        "Zgjidh formën juridike",
         unique_vals
     )
     if selected_vals:
-        df_filtered = df_filtered[df_filtered["Tipi i biznesit"].isin(selected_vals)]
+        df_filtered = df_filtered[df_filtered["Forma juridike"].isin(selected_vals)]
 
 # -----------------------------
 # FILTER: SEKTORI
@@ -380,30 +396,39 @@ df_biz = df_filtered
 st.sidebar.markdown("---")
 
 oversample_enabled = st.sidebar.checkbox("Oversampling", value=False)
-oversample_entries = []
-oversample_var = None
+oversample_inputs = {}   # {var: [{value, n}, ...], ...}
 
 if oversample_enabled:
-    oversample_var = st.sidebar.selectbox(
-        "Variabla për oversample",
-        strata_vars
+
+    oversample_vars = st.sidebar.multiselect(
+        "Zgjidh deri në 2 variabla për oversample:",
+        ["Komuna", "Madhësia e biznesit", "Sektori"],
+        max_selections=2
     )
 
-    vals = df_biz[oversample_var].value_counts()
-    valid_vals = vals[vals > 0].index.tolist()
+    for var in oversample_vars:
 
-    selected_vals = st.sidebar.multiselect(
-        f"Vlera për {oversample_var}",
-        valid_vals
-    )
+        st.sidebar.markdown(f"### {var}")
 
-    for v in selected_vals:
-        q = st.sidebar.number_input(
-            f"Kuota për {v}",
-            min_value=1, value=50,
-            key=f"os_{v}"
+        # get valid categories for that variable
+        valid_vals = df_biz[var].dropna().unique().tolist()
+
+        selected_vals = st.sidebar.multiselect(
+            f"Zgjidh vlerat për {var}",
+            valid_vals,
+            key=f"multi_{var}"
         )
-        oversample_entries.append({"value": v, "n": q})
+
+        entry_list = []
+        for v in selected_vals:
+            q = st.sidebar.number_input(
+                f"Kuota për {var} = {v}",
+                min_value=1, value=50, key=f"quota_{var}_{v}"
+            )
+            entry_list.append({"value": v, "n": q})
+
+        oversample_inputs[var] = entry_list
+
 
 #st.sidebar.markdown("---")
 #st.sidebar.subheader("Peshimi")
@@ -457,49 +482,88 @@ if run_button:
     grouped["n_alloc"] = 0
     seed = 42
 
-    # -----------------------------------------
-    # A) NO OVERSAMPLE
-    # -----------------------------------------
-    if not oversample_enabled or not oversample_entries:
-        weights = grouped["Pop_stratum"] / total_pop
+    # ============================
+    # OVERSAMPLING LOGIC (supports 0,1,2 variables)
+    # ============================
+    grouped["n_alloc"] = 0
+    seed = 42
+
+    # Build full OS list from oversample_inputs
+    all_os = []
+
+    for var, entry_list in oversample_inputs.items():
+        for entry in entry_list:
+            mask = (grouped[var] == entry["value"])
+            all_os.append({
+                "var": var,
+                "value": entry["value"],
+                "n": entry["n"],
+                "mask": mask
+            })
+
+    # ----------------------------------------
+    # CASE 0 — No oversampling
+    # ----------------------------------------
+    if len(all_os) == 0:
+        weights = grouped["Pop_stratum"] / grouped["Pop_stratum"].sum()
         floats = weights * n_total
-        grouped["n_alloc"] = controlled_rounding(floats, n_total, seed)
+        grouped["n_alloc"] = controlled_rounding(floats.to_numpy(), n_total, seed)
 
+    # ----------------------------------------
+    # CASE 1 — Single oversample variable/value
+    # ----------------------------------------
+    elif len(all_os) == 1:
+
+        osA = all_os[0]
+
+        # allocate OS group
+        alloc_A = alloc_to_mask(osA["mask"], osA["n"])
+        grouped["n_alloc"] += alloc_A
+
+        # allocate rest proportionally outside OS mask
+        remaining = n_total - int(alloc_A.sum())
+        mask_rest = (grouped["n_alloc"] == 0)
+        alloc_rest = alloc_to_mask(mask_rest, remaining)
+        grouped["n_alloc"] += alloc_rest
+
+    # ----------------------------------------
+    # CASE 2 — Two oversample variables
+    # ----------------------------------------
     else:
-        # -----------------------------------------
-        # B) WITH OVERSAMPLING
-        # -----------------------------------------
-        total_quota = sum(int(e["n"]) for e in oversample_entries)
+        # sort by quota descending
+        all_os_sorted = sorted(all_os, key=lambda x: x["n"], reverse=True)
 
-        if total_quota > n_total:
-            st.warning("Oversample quotas > total sample!")
+        # largest quota = OS-B
+        osB = all_os_sorted[0]
+        osA_list = all_os_sorted[1:]   # the remaining OS groups
 
-        used = 0
-        for entry in oversample_entries:
-            v = entry["value"]
-            quota = int(entry["n"])
+        # Step 1 – allocate B completely
+        alloc_B = alloc_to_mask(osB["mask"], osB["n"])
+        grouped["n_alloc"] = alloc_B
 
-            mask = grouped[oversample_var] == v
+        # Step 2 – allocate A variables one by one
+        for osA in osA_list:
 
-            df_sub = grouped[mask].copy()
-            if not df_sub.empty:
-                weights = df_sub["Pop_stratum"] / df_sub["Pop_stratum"].sum()
-                floats = weights * quota
-                alloc = controlled_rounding(floats.to_numpy(), quota, seed)
+            # overlap between A and B
+            overlap_mask = osA["mask"] & osB["mask"]
+            overlap_from_B = int(alloc_B[overlap_mask].sum())
 
-                grouped.loc[mask, "n_alloc"] += alloc
-                used += alloc.sum()
+            # remaining A quota after removing overlap count
+            remaining_A = max(osA["n"] - overlap_from_B, 0)
 
+            # allocate A only where B has NOT allocated
+            alloc_A = alloc_to_mask(osA["mask"] & ~osB["mask"], remaining_A)
+            grouped["n_alloc"] += alloc_A
+
+        # Step 3 – allocate the rest outside any OS mask
+        used = int(grouped["n_alloc"].sum())
         remaining = max(n_total - used, 0)
 
-        mask_rest = grouped["n_alloc"] == 0
-        df_sub = grouped[mask_rest]
+        combined_mask = sum([os["mask"] for os in all_os]) > 0
+        mask_rest = ~combined_mask
 
-        if not df_sub.empty:
-            weights = df_sub["Pop_stratum"] / df_sub["Pop_stratum"].sum()
-            floats = weights * remaining
-            alloc = controlled_rounding(floats.to_numpy(), remaining, seed)
-            grouped.loc[mask_rest, "n_alloc"] += alloc
+        alloc_rest = alloc_to_mask(mask_rest, remaining)
+        grouped["n_alloc"] += alloc_rest
 
     total_alloc = grouped["n_alloc"].sum()
 
@@ -511,7 +575,7 @@ if run_button:
     strata_text = ", ".join(strata_vars)
 
     if oversample_enabled:
-        oversampling_text = ", ".join(oversample_var)
+        oversampling_text = ", ".join(oversample_inputs)
     else:
         oversampling_text = "Joaktiv"
 
@@ -658,8 +722,8 @@ if run_button:
             "Numri i telefonit",
             "Komuna",
             "Regjioni",
-            "Tipi i biznesit",
-            "Kategoria",
+            "Forma juridike",
+            "Madhësia e biznesit",
             "Sektori",
             "Aktivitetet"
         ]
@@ -710,7 +774,7 @@ if run_button:
             for cat, pop in vc.items():
                 w_rows.append({
                     "Dimensioni": var,
-                    "Kategoria": cat,
+                    "Madhësia e biznesit": cat,
                     "Populacioni": int(pop),
                     "Pesha": pop / vc.sum()
                 })
