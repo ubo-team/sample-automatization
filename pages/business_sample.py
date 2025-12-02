@@ -106,6 +106,166 @@ def narrative_to_word(text: str) -> bytes:
     doc.save(buffer)
     return buffer.getvalue()
 
+def generate_recode_spss():
+    return r"""
+    RECODE D3 (2=7)
+    (3=4)
+    (8=1)
+    (4=5)
+    (5=1)
+    (6=7)
+    (7=6)
+    (9=1)
+    (10=5)
+    (11=3)
+    (12=7)
+    (13=5)
+    (14=6)
+    (15=3)
+    (16=6)
+    (17=2)
+    (18=1)
+    (19=4)
+    (20=4)
+    (21=2)
+    (22=2)
+    (23=1)
+    (24=1)
+    (25=6)
+    (26=3)
+    (27=1)
+    (1=1)
+    (28=4)
+    (29=7)
+    (30=6)
+    (33=5)
+    (34=5)
+    (31=2)
+    (32=4)
+    (35=6)
+    (36=2)
+    (37=2)
+    (38=2)
+    INTO Regjioni.
+    VARIABLE LABELS  Regjioni 'Regjioni'.
+    EXECUTE.
+
+    * RECODE - Madhësia e biznesit (sipas numrit të punëtorëve).
+    RECODE NumriPuntoreve 
+        (0 THRU 9 = 1)
+        (10 THRU 49 = 2)
+        (50 THRU 249 = 3)
+        (250 THRU HI = 4)
+        INTO BizSize.
+    VARIABLE LABELS BizSize 'Madhësia e biznesit sipas punëtorëve'.
+    VALUE LABELS BizSize
+        1 'Mikrondërmarrje'
+        2 'Ndërmarrje e vogël'
+        3 'Ndërmarrje e mesme'
+        4 'Ndërmarrje e madhe'.
+    EXECUTE.
+    """
+
+def generate_weighting_spss_syntax(wdf):
+    """
+    Merr tabelën wdf dhe prodhon sintaksën RAKE për SPSS.
+    Pret që wdf të përmbajë kolonat:
+    - Dimensioni
+    - Kategoria
+    - Kodi
+    - Pesha
+    """
+
+    syntax = "* SPSS WEIGHTING SYNTAX FOR BUSINESS SURVEY.\n\n"
+
+    # Shto recode për madhësinë e biznesit
+    syntax += generate_recode_spss()
+
+    syntax += "\n* RAKE WEIGHTING.\n"
+    syntax += "SPSSINC RAKE\n"
+
+    dim_index = 1
+
+    for dim in wdf["Dimensioni"].unique():
+
+        df_dim = wdf[wdf["Dimensioni"] == dim]
+
+        if df_dim.empty:
+            continue
+
+        syntax += f"DIM{dim_index}={dim}\n"
+
+        for _, row in df_dim.iterrows():
+            code = int(row["Kodi"])
+            coef = float(row["Pesha"])
+            syntax += f"  {code} {coef}\n"
+
+        dim_index += 1
+
+    syntax += "FINALWEIGHT = peshat.\nEXECUTE.\n"
+
+    return syntax
+
+def add_codes_to_business_wdf(wdf):
+    """
+    Marrim wdf:
+        Dimensioni | Kategoria | Populacioni | Pesha
+    Dhe i shtojmë kolonën 'Kodi' sipas logjikës së peshimit të bizneseve.
+    """
+
+    # ============================
+    # Kodet e Regjioneve
+    # ============================
+    region_codes = {
+        "Regjioni i Prishtinës": 1,
+        "Regjioni i Mitrovicës": 2,
+        "Regjioni i Pejës": 3,
+        "Regjioni i Prizrenit": 4,
+        "Regjioni i Ferizajit": 5,
+        "Regjioni i Gjilanit": 6,
+        "Regjioni i Gjakovës": 7
+    }
+
+    # ============================
+    # Kodet e Madhësisë së biznesit
+    # ============================
+    bizsize_codes = {
+        "Mikrondërmarrje": 1,
+        "Ndërmarrje e vogël": 2,
+        "Ndërmarrje e mesme": 3,
+        "Ndërmarrje e madhe": 4,
+    }
+
+    # ============================
+    # Kodet e Sektorit (auto)
+    # ============================
+    # Krijon kodet dinamike 1..K sipas rendit alfabetik
+    sectors = sorted(wdf[wdf["Dimensioni"] == "Sektori"]["Kategoria"].unique())
+    sector_codes = {sec: i+1 for i, sec in enumerate(sectors)}
+
+    # ============================
+    # Inicializojmë kolonën Kodi
+    # ============================
+    wdf["Kodi"] = None
+
+    # ============================
+    # Loop për t’i caktuar kodet
+    # ============================
+    for i, row in wdf.iterrows():
+        dim = row["Dimensioni"]
+        cat = row["Kategoria"]
+
+        if dim == "Regjioni":
+            wdf.at[i, "Kodi"] = region_codes.get(cat)
+
+        elif dim == "Madhësia e biznesit":
+            wdf.at[i, "Kodi"] = bizsize_codes.get(cat)
+
+        elif dim == "Sektori":
+            wdf.at[i, "Kodi"] = sector_codes.get(cat)
+
+    return wdf
+
 
 # =====================================================
 # CONFIG & PAGE STYLE
@@ -428,16 +588,8 @@ if oversample_enabled:
             entry_list.append({"value": v, "n": q})
 
         oversample_inputs[var] = entry_list
-
-
-#st.sidebar.markdown("---")
-#st.sidebar.subheader("Peshimi")
-
-#weighting_vars = st.sidebar.multiselect(
-#    "Zgjedh variablat për peshim",
-#    available_strata,
-#    default=["Komuna", "Sektori"]
-#)
+else:
+    oversample_vars = []
 
 run_button = st.sidebar.button("Gjenero shpërndarjen e mostrës")
 
@@ -753,15 +905,17 @@ if run_button:
     # =====================================================
 
     if warnings_list:
-        st.warning("Disa strata nuk kanë mjaftueshëm biznese me numra telefoni:")
-        for w in warnings_list:
-            st.write("- ", w)
+        st.warning("Disa strata nuk kanë mjaftueshëm biznese me numra telefoni.")
 
 
     # =====================================================
     # WEIGHTING TABLE
     # =====================================================
-    weighting_vars = False
+    weighting_vars = ["Regjioni", "Sektori", "Madhësia e biznesit"]
+
+    # Remove oversample variables from weighting vars
+    weighting_vars = [v for v in weighting_vars if v not in oversample_vars]
+
     if weighting_vars:
         st.markdown("---")
         st.subheader("Sintaksa për peshim në SPSS")
@@ -774,21 +928,26 @@ if run_button:
             for cat, pop in vc.items():
                 w_rows.append({
                     "Dimensioni": var,
-                    "Madhësia e biznesit": cat,
+                    "Kategoria": cat,
                     "Populacioni": int(pop),
                     "Pesha": pop / vc.sum()
                 })
         wdf = pd.DataFrame(w_rows)
-
+        wdf = add_codes_to_business_wdf(wdf)
+        wdf = wdf[wdf["Kategoria"] != "Pa kategori"]
+        wdf = wdf[wdf["Kategoria"] != "nan"]
+        wdf = wdf[wdf["Kategoria"] != "I panjohur"]
+        
         with st.expander("Shfaq tabelën e plotë të peshave", expanded=False):
             st.dataframe(wdf, use_container_width=True)
 
-        #create_download_link(
-         #   file_bytes=spss_text.encode("utf-8"),
-          #  filename=f"sintaksa_peshat_biznese.sps",
-          #  label="Shkarko Peshat për SPSS"
-        #)
+        spss_text = generate_weighting_spss_syntax(wdf)
 
+        create_download_link(
+            file_bytes=spss_text.encode("utf-8"),
+            filename="peshat_biznese.sps",
+            label="Shkarko Peshat për SPSS"
+        )
 
     # =====================================================
     # NARRATIVE
