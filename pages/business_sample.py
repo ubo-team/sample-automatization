@@ -917,6 +917,7 @@ if run_button:
     weighting_vars = [v for v in weighting_vars if v not in oversample_vars]
 
     if weighting_vars:
+        df_biz = df_biz[df_biz["Regjioni"] != "I panjohur"]
         st.markdown("---")
         st.subheader("Sintaksa për peshim në SPSS")
 
@@ -934,9 +935,6 @@ if run_button:
                 })
         wdf = pd.DataFrame(w_rows)
         wdf = add_codes_to_business_wdf(wdf)
-        wdf = wdf[wdf["Kategoria"] != "Pa kategori"]
-        wdf = wdf[wdf["Kategoria"] != "nan"]
-        wdf = wdf[wdf["Kategoria"] != "I panjohur"]
         
         with st.expander("Shfaq tabelën e plotë të peshave", expanded=False):
             st.dataframe(wdf, use_container_width=True)
@@ -944,7 +942,7 @@ if run_button:
         spss_text = generate_weighting_spss_syntax(wdf)
 
         create_download_link(
-            file_bytes=spss_text.encode("utf-8"),
+            file_bytes=spss_text.encode("utf-8-sig"),
             filename="peshat_biznese.sps",
             label="Shkarko Peshat për SPSS"
         )

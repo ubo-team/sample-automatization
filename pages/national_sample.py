@@ -83,53 +83,37 @@ st.markdown("""
 
 
 narrative_template_common = """
-Sample Design and Sampling Frame  
-This study used a probability-based, stratified sampling design drawn from the {country} official census frame.  
-The target population consists of residents aged 18 and over across all regions and municipalities.  
-The census served as the sampling frame, providing household and population counts by region, municipality, urban/rural area, and ethnicity.  
+Methodology and Sampling Frame
+The National Social Survey for Kosovo is based on the principles of {survey_label} survey methodology. In more specific terms, the collection of data for this quantitative study is executed through {methodology_label}.
+The sample design is based on a modified multistage random sampling methodology. Crucially, the sampling frame is constructed using a dual-source approach to address recent demographic data challenges:
+General Population: For the majority of municipalities, the sample design is based on the preliminary results of the Kosovo Census 2024, conducted by the Kosovo Agency of Statistics (KAS).
+Serb-Majority Municipalities: Due to the significant non-participation of the ethnic Serb community in the 2024 Census, population estimates for Serb-majority municipalities are derived from the 2024 OSCE Municipal Profiles, which provide the most reliable current estimates for these specific areas.
 
-Stratification and Allocation  
-Strata were defined by {list_strata}.  
-Each stratum received an allocation proportional to its population size using probability proportional to size (PPS).  
-Where relevant, oversampling was applied to: {oversampled_segments}.  
-Final sample sizes were adjusted through controlled rounding to maintain the overall target of {n_total} interviews while minimizing rounding bias.  
+Stratification and Quotas
+Sample quotas are calculated maintaining Probability Proportionate to Size (PPS). The sampling design follows a hierarchical stratification logic to ensure representativeness. The levels of stratification for this specific survey are applied in the following order:
+Primary Stratification: {primary_level}
+Secondary Stratification: {sub_options}
 """
 
 narrative_template_capi = """
-Primary Sampling Units (PSUs) – CAPI  
-Primary sampling units were villages and neighbourhoods identified in the census frame.  
-Within each stratum, PSUs were selected using PPS without replacement.  
-A total of {num_psus_selected} PSUs were selected nationwide, each with {interviews_per_psu} interviews.  
-
-Within-PSU & Respondent Selection  
-Inside each selected PSU, households were selected systematically using a fixed skip interval (k) derived from dwelling counts.  
-Interviewers visited every k-th household and made up to three callbacks.  
-Within each household, the respondent was selected using the {respondent_selection_method} technique.  
-No substitutions were permitted.  
+For each municipality, the list of settlements from the combined KAS/OSCE data is used to randomly select the Primary Sampling Units (PSUs). The nominal number of interviews for a single PSU is set at {interviews_per_psu} interviews.
+If a settlement is allocated more interviews than the nominal PSU size, additional PSUs are selected within that settlement. In larger urban areas (which KAS often classifies as a single settlement), a neighborhood-based stratification is applied. Selection of additional PSUs is organized by dividing the settlement according to the multiples of {interviews_per_psu}, following a counter-clockwise orientation from a central landmark.
 """
 
 narrative_template_cati = """
-CATI Design  
-The same stratification and allocation principles were applied to draw respondents from a probability-aligned telephone sampling frame.  
-Each stratum contributed the same proportion of interviews as defined in the national sample design.  
-No PSU stage was applied; individuals were selected directly within each stratum.  
-
-CATI Procedures  
-Callers attempted each sampled number up to three times at different times of day.  
-Non-answering numbers were retired only after three failed attempts.  
-Respondents were screened for eligibility (aged 18+).  
+For the telephone survey, the selection of the settlement/municipality is done via Random Digit Dialing (RDD) or database selection to comply with the probability sampling condition. The "PSU" in this context refers to the individual valid phone number, stratified by region to match the geographic quotas defined above.  
 """
 
-narrative_template_cawi = """
-CAWI Design  
-The same stratification and allocation principles were applied to draw respondents from an online panel aligned to census strata.  
-Each stratum contributed the same proportion of interviews as defined in the sample design.  
-No PSU stage was applied; individuals were selected directly within each stratum.  
+narrative_template_oversampling = """
+Oversampling Procedures To ensure reliable estimates for specific sub-groups that would otherwise have a remote chance of being interviewed at statistically significant levels, this survey employs oversampling.  
+"""
 
-CAWI Procedures  
-Panel members received email invitations and reminders.  
-Only eligible adults aged 18+ were allowed to complete the survey.  
-Duplicate or suspicious responses were removed by automated quality controls.  
+narrative_template_oversampling_inactive = """
+ For this specific project, no oversampling was applied; the sample strictly follows the proportional population distribution.  
+"""
+
+narrative_template_oversampling_active = """
+Test  
 """
 
 RECODE_D3_TEMPLATE = r"""
@@ -1744,6 +1728,15 @@ if data_collection_method=="CAPI":
         value=8,
         step=1
     )
+    survey_label = "household"
+    methodology_label = "face-to-face Computer-Assisted Personal Interviewing (CAPI)"
+
+elif data_collection_method=="CATI":
+    survey_label = "individual"
+    methodology_label = "Computer-Assisted Telephone Interviewing (CATI)"
+
+elif data_collection_method=="CAWI":
+    methodology_label = "Computer-Assisted Web Interviewing (CAWI)"
 
 st.sidebar.markdown("---")
 
@@ -2510,25 +2503,28 @@ if run_button:
 
     strata_list = [primary_level] + sub_options
     narrative_text = narrative_template_common.format(
-        country="Kosovo",
-        list_strata=strata_list,
-        oversampled_segments=oversample_vars,
-        n_total=n_total
+        survey_label = survey_label,
+        methodology_label = methodology_label,
+        primary_level = primary_level,
+        sub_options = sub_options
     )
 
     # METHOD-SPECIFIC SECTION
     if data_collection_method == "CAPI":
         narrative_text += narrative_template_capi.format(
-            num_psus_selected=interviews_per_psu,
-            interviews_per_psu=interviews_per_psu,
-            respondent_selection_method=data_collection_method
+            interviews_per_psu=interviews_per_psu
         )
 
     elif data_collection_method == "CATI":
         narrative_text += narrative_template_cati
 
-    elif data_collection_method == "CAWI":
-        narrative_text += narrative_template_cawi
+    if oversample_enabled:
+        narrative_text += narrative_template_oversampling
+        narrative_text += narrative_template_oversampling_active
+
+    else:
+        narrative_text += narrative_template_oversampling
+        narrative_text += narrative_template_oversampling_inactive
 
     st.markdown("---")  
     st.subheader("Përshkrimi i dizajnimit të mostrës")
