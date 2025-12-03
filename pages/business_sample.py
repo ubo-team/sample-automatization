@@ -5,6 +5,43 @@ import base64
 from io import BytesIO
 from docx import Document
 
+narrative_template_common = """
+**Sampling Universe**
+
+An up-to-date list of active businesses from the Kosovo Business Registration Agency (KBRA) will be used as the sampling universe. This database serves as the foundation for both the sample design and the population of the sample with businesses to be interviewed.
+
+**Sampling Methodology**
+
+The sampling methodology is a two-stage activity consisting of sample design and the selection of businesses to populate sample quotas. UBO Consulting is proposing a sample size of {N} businesses across Kosovo. The selection follows a rigorous approach to obtain a representative and unbiased survey sample, allowing findings to be generalized to the entire population of Kosovan businesses within a given power of statistical precision of a margin of error of {moe} at a 95% confidence interval.
+
+**Stratification Strategy**
+The survey employs a stratified random sampling strategy to ensure that the sample accurately mirrors the structure of the business population. This is achieved through a multi-stage stratification process:
+
+- **Stage I: Geographic Stratification** - The population is first stratified into {first_strata} sub-groups. Sample sizes are determined based on the distribution of the business population, maintaining Probability Proportionate to Size (PPS).
+"""
+
+narrative_template_oversampling = """
+**Oversampling Procedures** 
+
+This survey employs a deliberate oversampling strategy to ensure robust data quality across all key analytical categories. For this, we apply **Disproportionate Stratified Sampling**:
+
+- Base Quota: The general population is sampled according to its natural distribution.
+- Boost Quota: The [Insert Target Group] is assigned a forced minimum quota (oversample) to ensure enough observations are collected to allow for valid comparisons between [Insert Comparison Categories, e.g., size classes / regions / sectors].
+Adjustments for this oversampling will be handled during the analytical phase using post-stratification weights. This ensures that while the sample contains enough members of the target group for detailed analysis, the final results are weighted back to reflect the actual proportions of the Kosovo economy.
+"""
+
+narrative_template_randomization = """
+**Sample Selection and Randomization**
+
+In the final stage, the quotas for each basket type are populated using a **systematic random selection** technique. A randomization algorithm is employed within each basket to ensure that the selected firms mirror the structure of the populations as closely as possible.  
+"""
+
+narrative_template_reserves = """
+**Replacement Strategy**
+
+A reserve list of businesses for each basket is generated to serve as potential replacements during data collection. Recognizing that administrative lists may contain inactive businesses or inaccurate contact details—or that representatives may refuse participation—reserve lists will be used strictly as equivalent replacements (within the exact same basket/stratum) to maintain sample integrity. To ensure fieldwork continuity without the need for re-sampling, the reserve list is generated with a size of {reserve_size}, depending on the anticipated non-response and ineligibility rates for each specific stratum.
+"""
+
 # =====================================================
 # HELPER FUNCTIONS
 # =====================================================
@@ -344,6 +381,12 @@ st.markdown("""
     color: #000000;
     margin-bottom: 4px;
     }   
+            
+/* Set sidebar width */
+[data-testid="stSidebar"] {
+    width: 25% !important;
+    min-width: 25% !important;
+}
 
 </style>
 """, unsafe_allow_html=True)
@@ -412,26 +455,24 @@ n_total = st.sidebar.number_input(
     step=100
 )
 
-available_strata = [
-    c for c in ["Regjioni", "Komuna", "Sektori", "NACE", "Forma juridike", "Madhësia e biznesit"]
-    if c in df_biz.columns
-]
-
-strata_vars = st.sidebar.multiselect(
-    "Zgjidh variablat për ndarje",
-    available_strata,
-    default=["Komuna", "Sektori"]
+first_strata = st.sidebar.selectbox(
+    "Zgjidh variablën për ndarjen e parë",
+    ["Regjioni", "Komuna"],
+    index=1
 )
 
-if not strata_vars:
-    st.stop()
+second_strata = st.sidebar.multiselect(
+    "Zgjidhni variablat për ndarjen e dytë",
+    ["Madhësia e biznesit", "Sektori", "NACE", "Forma juridike"],
+    default=["Madhësia e biznesit", "Sektori"]
+)
+
+strata_vars = [first_strata] + second_strata
 
 survey_type = st.sidebar.selectbox(
     "Mbledhja e të dhënave",
     ["CAPI", "CATI", "CAWI"]
 )
-
-reserve_pct = 0   # no manual reserve
 
 st.sidebar.markdown("---")
 
@@ -552,6 +593,38 @@ if df_filtered.empty:
     st.stop()
 
 df_biz = df_filtered
+
+st.sidebar.markdown("---")
+
+st.sidebar.subheader("Rezervat për kontakte")
+
+reserve_mode = st.sidebar.radio(
+    "Metoda për llogaritjen e rezervave:",
+    ["Përqindje (%)", "Proporcion"],
+    index=0
+)
+
+reserve_percentage = None
+reserve_ratio = None
+
+if reserve_mode == "Përqindje (%)":
+    reserve_percentage = st.sidebar.number_input(
+        "Shkruaj përqindjen e rezervave (%)",
+        min_value=1,
+        max_value=500,
+        value=20,
+        step=10
+    )
+
+elif reserve_mode == "Proporcion":
+    reserve_ratio = st.sidebar.number_input(
+        "Vendos numrin për proporcion (p.sh. 2 për 2:1)",
+        min_value=1,
+        max_value=10,
+        value=2,
+        step=1
+    )
+
 
 st.sidebar.markdown("---")
 
@@ -808,7 +881,19 @@ if run_button:
             continue
 
         intervista = int(intervista)
-        reserve_n = intervista * 2
+        # ----------------------------------------------------
+        # RESERVE ALLOCATION BASED ON SELECTED MODE
+        # ----------------------------------------------------
+        if  reserve_mode == "Përqindje (%)":
+            reserve_n = int(intervista * (reserve_percentage / 100))
+
+        elif reserve_mode == "Proporcion":
+            reserve_n = int(intervista * (reserve_ratio - 1))
+
+        # Minimum 1 if reserve exists but evaluates 0
+        if reserve_n < 0:
+            reserve_n = 0
+            st.warning("Zgjedhni një vlerë të saktë për rezerva")
 
         # ----------------------------------------------------
         # Filter original DF based on strata variables

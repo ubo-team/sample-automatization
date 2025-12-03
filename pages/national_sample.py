@@ -79,7 +79,13 @@ st.markdown("""
     font-size: 16px;
     color: #000000;
     margin-bottom: 4px;
-    }         
+    }  
+
+/* Set sidebar width */
+[data-testid="stSidebar"] {
+    width: 25% !important;
+    min-width: 25% !important;
+}       
             
 </style>
 """, unsafe_allow_html=True)
@@ -2825,7 +2831,7 @@ if run_button:
                 border-radius:8px;
                 margin-top:10px;
                 cursor:pointer;">
-                Shkarko Narrativën (Word)
+                Shkarko Përshkrimin (Word)
             </div>
         </a>
     """, unsafe_allow_html=True)

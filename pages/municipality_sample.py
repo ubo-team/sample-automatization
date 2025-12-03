@@ -80,7 +80,12 @@ st.markdown("""
     color: #000000;
     margin-bottom: 4px;
     }   
-
+            
+/* Set sidebar width */
+[data-testid="stSidebar"] {
+    width: 25% !important;
+    min-width: 25% !important;
+}
 </style>
 """, unsafe_allow_html=True)
 
