@@ -6,8 +6,11 @@ import pandas as pd
 import numpy as np
 import streamlit as st
 import base64
-from io import BytesIO
 from docx import Document
+from docx import Document
+from docx.shared import Pt
+from docx.enum.text import WD_BREAK
+import re
 
 st.markdown("""
     <div style='width: 100%; padding: 20px 30px; background: #ffffff;
@@ -83,20 +86,25 @@ st.markdown("""
 
 
 narrative_template_common = """
-Methodology and Sampling Frame
-The National Social Survey for Kosovo is based on the principles of {survey_label} survey methodology. In more specific terms, the collection of data for this quantitative study is executed through {methodology_label}.
-The sample design is based on a modified multistage random sampling methodology. Crucially, the sampling frame is constructed using a dual-source approach to address recent demographic data challenges:
-General Population: For the majority of municipalities, the sample design is based on the preliminary results of the Kosovo Census 2024, conducted by the Kosovo Agency of Statistics (KAS).
-Serb-Majority Municipalities: Due to the significant non-participation of the ethnic Serb community in the 2024 Census, population estimates for Serb-majority municipalities are derived from the 2024 OSCE Municipal Profiles, which provide the most reliable current estimates for these specific areas.
+**Methodology and Sampling Frame**
 
-Stratification and Quotas
+The National Social Survey for Kosovo is based on the principles of {survey_label} survey methodology. In more specific terms, the collection of data for this quantitative study is executed through {methodology_label}.The proposed sample of **N={n_total}** has a 95% of confidence level with a **{moe}** of margin of error.
+The sample design is based on a modified multistage random sampling methodology. Crucially, the sampling frame is constructed using a dual-source approach to address recent demographic data challenges:
+
+- **General Population**: For the majority of municipalities, the sample design is based on the preliminary results of the Kosovo Census 2024, conducted by the Kosovo Agency of Statistics (KAS).
+- **Serb-Majority Municipalities**: Due to the significant non-participation of the ethnic Serb community in the 2024 Census, population estimates for Serb-majority municipalities are derived from the 2024 OSCE Municipal Profiles, which provide the most reliable current estimates for these specific areas.
+
+**Stratification and Quotas**
+
 Sample quotas are calculated maintaining Probability Proportionate to Size (PPS). The sampling design follows a hierarchical stratification logic to ensure representativeness. The levels of stratification for this specific survey are applied in the following order:
-Primary Stratification: {primary_level}
-Secondary Stratification: {sub_options}
+
+- **Primary Stratification**: {primary_level}
+- **Secondary Stratification**: {second_level}
+- **Tertiary Stratification**: {third_level}
 """
 
 narrative_template_capi = """
-For each municipality, the list of settlements from the combined KAS/OSCE data is used to randomly select the Primary Sampling Units (PSUs). The nominal number of interviews for a single PSU is set at {interviews_per_psu} interviews.
+For each municipality, the list of settlements from the combined KAS/OSCE data is used to randomly select the Primary Sampling Units (PSUs). The nominal number of interviews for a single PSU is set at **{interviews_per_psu} interviews**.
 If a settlement is allocated more interviews than the nominal PSU size, additional PSUs are selected within that settlement. In larger urban areas (which KAS often classifies as a single settlement), a neighborhood-based stratification is applied. Selection of additional PSUs is organized by dividing the settlement according to the multiples of {interviews_per_psu}, following a counter-clockwise orientation from a central landmark.
 """
 
@@ -105,7 +113,9 @@ For the telephone survey, the selection of the settlement/municipality is done v
 """
 
 narrative_template_oversampling = """
-Oversampling Procedures To ensure reliable estimates for specific sub-groups that would otherwise have a remote chance of being interviewed at statistically significant levels, this survey employs oversampling.  
+**Oversampling Procedures** 
+
+To ensure reliable estimates for specific sub-groups that would otherwise have a remote chance of being interviewed at statistically significant levels, this survey employs oversampling.  
 """
 
 narrative_template_oversampling_inactive = """
@@ -113,7 +123,14 @@ narrative_template_oversampling_inactive = """
 """
 
 narrative_template_oversampling_active = """
-Test  
+For this project, we have oversampled the following categories:
+
+- **Target Group:** {os_target_group}
+- **Method:** We selected **{os_added_total}** additional respondents from this group beyond their natural population proportion.
+
+Adjustments for this oversampling will be required at the analytical phase.  
+Weights will be applied so that oversampled groups are brought back to their true share in the population (KAS 2024, OSCE 2024).  
+This ensures that national-level estimates remain representative while still allowing reliable subgroup analysis.
 """
 
 RECODE_D3_TEMPLATE = r"""
@@ -159,6 +176,48 @@ RECODE D3 (2=7)
 VARIABLE LABELS  Regjioni 'Regjioni'.
 EXECUTE.
 """
+
+TRANSLATIONS = {
+
+    # ====================
+    # VARIABLES (Dimensions)
+    # ====================
+    "Komuna": "Municipality",
+    "Komunë": "Municipality",
+    "Regjion": "Region",
+    "Vendbanimi": "Settlement",
+    "Vendbanim" :"Settlement",
+    "Etnia": "Ethnicity",
+    "Etni": "Ethnicity",
+    "Gjinia": "Gender",
+    "Mosha": "Age group",
+    "Grupmosha": "Age group",
+
+    # ====================
+    # VALUES: Gender
+    # ====================
+    "Femra": "Female",
+    "Meshkuj": "Male",
+
+    # ====================
+    # VALUES: Ethnicity
+    # ====================
+    "Shqiptar": "Albanian",
+    "Serb": "Serb",
+    "Tjerë": "Other",
+
+    # ====================
+    # VALUES: Regions
+    # ====================
+    "Prishtinë": "Pristina",
+    "Mitrovicë": "Mitrovica",
+    "Gjilan": "Gjilan",
+    "Gjakovë": "Gjakova",
+    "Ferizaj": "Ferizaj",
+    "Prizren": "Prizren",
+    "Pejë": "Peja",
+}
+
 
 
 # =========================
@@ -487,9 +546,10 @@ def fix_minimum_allocations(
     pivot: pd.DataFrame,
     df_eth: pd.DataFrame,
     region_map: dict,
+    strata_col: list,
     min_total: int = 3,
     min_eth: int = 3,      # threshold for removing (total eth < 3)
-    min_vb: int = 2        # not used for ethnicity removal now, only for settlement logic
+    min_vb: int = 2     # not used for ethnicity removal now, only for settlement logic
 ) -> pd.DataFrame:
 
     pivot_fixed = pivot.copy()
@@ -664,8 +724,7 @@ def fix_minimum_allocations(
     # RECOMPUTE TOTALS
     # -----------------------------------------------------
 
-    subs = [c for c in pivot_fixed.columns if c not in ["Total"]]
-    pivot_fixed["Total"] = pivot_fixed[subs].sum(axis=1)
+    pivot_fixed["Total"] = pivot_fixed[strata_col].sum(axis=1)
 
     # Ribëj totalin e fundit
     pivot_fixed.loc["Total"] = pivot_fixed.sum(numeric_only=True)
@@ -1174,14 +1233,118 @@ def compute_filtered_pop_for_psu_row(
 
     return max(final_pop, 0)
 
-def narrative_to_word(text: str) -> bytes:    
+
+from docx import Document
+from docx.enum.text import WD_ALIGN_PARAGRAPH
+import re
+
+def add_markdown_runs(paragraph, text):
+    """Adds runs with markdown formatting: bold, italic, bold+italic."""
+    bold_italic = r"\*\*\*(.+?)\*\*\*"
+    bold = r"\*\*(.+?)\*\*"
+    italic = r"\*(.+?)\*"
+
+    tokens = re.split(r"(\*\*\*.+?\*\*\*|\*\*.+?\*\*|\*.+?\*)", text)
+
+    for token in tokens:
+        run = paragraph.add_run()
+        if re.match(bold_italic, token):
+            run.text = re.findall(bold_italic, token)[0]
+            run.bold = True
+            run.italic = True
+        elif re.match(bold, token):
+            run.text = re.findall(bold, token)[0]
+            run.bold = True
+        elif re.match(italic, token):
+            run.text = re.findall(italic, token)[0]
+            run.italic = True
+        else:
+            run.text = token
+
+
+def narrative_to_word(markdown_text: str) -> bytes:
     doc = Document()
-    for line in text.split("\n"):
-        doc.add_paragraph(line)
-    
+
+    # REMOVE double blank lines (convert them to a single paragraph)
+    lines = markdown_text.split("\n")
+    cleaned_lines = []
+    skip_next = False
+
+    for i in range(len(lines)):
+        if i < len(lines) - 1 and lines[i].strip() == "" and lines[i+1].strip() == "":
+            # skip multiple blank lines
+            if not skip_next:
+                cleaned_lines.append("")  # keep one blank line
+            skip_next = True
+        else:
+            cleaned_lines.append(lines[i])
+            skip_next = False
+
+    # CONVERT TO WORD PARAGRAPHS
+    for line in cleaned_lines:
+
+        # ----- HEADINGS (keep centered/left as Word default) -----
+        if line.startswith("### "):
+            doc.add_heading(line[4:], level=3)
+            continue
+        elif line.startswith("## "):
+            doc.add_heading(line[3:], level=2)
+            continue
+        elif line.startswith("# "):
+            doc.add_heading(line[2:], level=1)
+            continue
+
+        # ----- BULLET POINTS -----
+        if line.strip().startswith("- "):
+            p = doc.add_paragraph(style="List Bullet")
+            p.alignment = WD_ALIGN_PARAGRAPH.JUSTIFY
+            add_markdown_runs(p, line.strip()[2:])
+            continue
+
+        # ----- BLANK LINE -----
+        if line.strip() == "":
+            continue
+
+        # ----- NORMAL PARAGRAPH -----
+        p = doc.add_paragraph()
+        add_markdown_runs(p, line)
+        p.alignment = WD_ALIGN_PARAGRAPH.JUSTIFY
+
+    # Return bytes file
+    from io import BytesIO
     buffer = BytesIO()
     doc.save(buffer)
     return buffer.getvalue()
+
+def add_markdown_runs(paragraph, text):
+    """Adds runs with markdown formatting: bold, italics, bold+italic."""
+
+    # Patterns:
+    bold_italic = r"\*\*\*(.+?)\*\*\*"
+    bold = r"\*\*(.+?)\*\*"
+    italic = r"\*(.+?)\*"
+
+    # Tokenize using a combined regex
+    tokens = re.split(r"(\*\*\*.+?\*\*\*|\*\*.+?\*\*|\*.+?\*)", text)
+
+    for token in tokens:
+        run = paragraph.add_run()
+
+        if re.match(bold_italic, token):
+            run.text = re.findall(bold_italic, token)[0]
+            run.bold = True
+            run.italic = True
+
+        elif re.match(bold, token):
+            run.text = re.findall(bold, token)[0]
+            run.bold = True
+
+        elif re.match(italic, token):
+            run.text = re.findall(italic, token)[0]
+            run.italic = True
+
+        else:
+            run.text = token
 
 def df_to_excel_bytes(df: pd.DataFrame, sheet_name: str = "Data") -> bytes:
         from io import BytesIO
@@ -1665,6 +1828,35 @@ def generate_spss_syntax(coef_df, recode_d3_text, data_collection_method):
 
     return out
 
+def compute_natural_allocation_from_weights(coef_df, variable, value, n_total):
+    """
+    Returns the natural (population-proportion) interview count 
+    for a given oversample variable/value.
+    """
+    df_dim = coef_df[coef_df["Dimensioni"] == variable]
+
+    if df_dim.empty:
+        return None  # This variable not in weight table
+
+    row = df_dim[df_dim["Kategoria"] == value]
+
+    if row.empty:
+        return None  # Value not found
+
+    weight = float(row["Pesha"].values[0])
+    return round(weight * n_total)
+
+def translate(term: str) -> str:
+    # Normalize
+    term = str(term).strip()
+
+    # 1. Direct dictionary lookup
+    if term in TRANSLATIONS:
+        return TRANSLATIONS[term]
+
+    # 2. Fallback: return original
+    return term
+
 # Load data
 try:
     df_eth = load_ethnicity_settlement_data("excel-files/ASK-2024-Komuna-Etnia-Vendbanimi.xlsx")
@@ -2064,6 +2256,7 @@ if run_button:
     # ================================
     # 7a) Oversampling
     # ================================
+    # Save natural allocation BEFORE oversampling
     grouped["n_alloc"] = 0
 
     oversample_items = list(oversample_inputs.items())
@@ -2183,8 +2376,10 @@ if run_button:
         values="n_alloc"
     ).fillna(0).astype(int)
 
+    original_strata_cols = list(pivot.columns)
+
     # Add total per primary
-    pivot["Total"] = pivot.sum(axis=1)
+    pivot["Total"] = pivot[original_strata_cols].sum(axis=1)
     
     # ==========================================================
     #  OVERSAMPLE GENDER/MOSHA pas pivot (në nivel KOMUNE)
@@ -2289,6 +2484,7 @@ if run_button:
             pivot=pivot,
             df_eth= df_eth,
             region_map=region_map,
+            strata_col = original_strata_cols,
             min_total=3,   # minimum anketa per komunë
             min_eth=3      # minimum per vendbanim (Urban/Rural)
             )
@@ -2499,60 +2695,13 @@ if run_button:
 
     # COMMON SECTION (always included)
     if not oversample_enabled:
-        oversample_vars = None
-
-    strata_list = [primary_level] + sub_options
-    narrative_text = narrative_template_common.format(
-        survey_label = survey_label,
-        methodology_label = methodology_label,
-        primary_level = primary_level,
-        sub_options = sub_options
-    )
-
-    # METHOD-SPECIFIC SECTION
-    if data_collection_method == "CAPI":
-        narrative_text += narrative_template_capi.format(
-            interviews_per_psu=interviews_per_psu
-        )
-
-    elif data_collection_method == "CATI":
-        narrative_text += narrative_template_cati
-
-    if oversample_enabled:
-        narrative_text += narrative_template_oversampling
-        narrative_text += narrative_template_oversampling_active
-
-    else:
-        narrative_text += narrative_template_oversampling
-        narrative_text += narrative_template_oversampling_inactive
-
-    st.markdown("---")  
-    st.subheader("Përshkrimi i dizajnimit të mostrës")
-
-    with st.expander("Shfaq përshkrimin e dizajnimit të mostrës"):
-        st.markdown(narrative_text)
-
+        third_strata = "Gender and Age Group"
     
-    narrative_doc = narrative_to_word(narrative_text)
-
-    b64 = base64.b64encode(narrative_doc).decode()
-
-    st.markdown(f"""
-        <a href="data:application/octet-stream;base64,{b64}" download="Survey_Narrative.docx">
-            <div style="
-                background-color:#344b77;
-                color:white;
-                text-align:center;
-                font-weight:500;
-                font-size:16px;
-                padding:10px;
-                border-radius:8px;
-                margin-top:10px;
-                cursor:pointer;">
-                Shkarko Narrativën (Word)
-            </div>
-        </a>
-    """, unsafe_allow_html=True)
+    else:
+        if "Gjinia" in oversample_vars:
+            third_strata = "Age Group"
+        else: 
+            third_strata = "Gender"
 
     coef_df = compute_population_coefficients(
     df_ga=df_ga,
@@ -2574,6 +2723,113 @@ if run_button:
         .nunique()
     )
 
+    # ============================================
+    # NATURAL ALLOCATIONS for OVERSAMPLING narrative
+    # ============================================
+    os_additional_list = []
+
+    for var, entries in oversample_inputs.items():
+
+        for entry in entries:
+
+            # Category label
+            if var == "Mosha":
+                cat_label = f"{entry['min_age']}–{entry['max_age']}"
+            else:
+                cat_label = entry["value"]
+
+            # Compute natural allocation BEFORE removing dimensions
+            natural = compute_natural_allocation_from_weights(
+                coef_df, variable=var, value=cat_label, n_total=n_total
+            )
+
+            # Target (oversample quota)
+            target = entry["n"]
+
+            # Added respondents
+            added = max(target - (natural or 0), 0)
+
+            # Store for narrative
+            os_additional_list.append({
+                "var": var,
+                "value": cat_label,
+                "natural": natural,
+                "target": target,
+                "added": added
+            })
+
+    second_level = []
+    for i in sub_options:
+        i = translate(i)
+        second_level.append(i)
+
+    strata_list = [primary_level] + sub_options
+    narrative_text = narrative_template_common.format(
+        survey_label = survey_label,
+        methodology_label = methodology_label,
+        n_total=n_total,
+        moe= f"{round(moe * 100, 2)}%",
+        primary_level = translate(primary_level),
+        second_level = " and ".join(second_level),
+        third_level = translate(third_strata)
+    )
+
+    # METHOD-SPECIFIC SECTION
+    if data_collection_method == "CAPI":
+        narrative_text += narrative_template_capi.format(
+            interviews_per_psu=interviews_per_psu
+        )
+
+    elif data_collection_method == "CATI":
+        narrative_text += narrative_template_cati
+
+    if oversample_enabled:
+        os_target_group = "; ".join(
+            f"{translate(item['value'])}" 
+            for item in os_additional_list
+        )
+
+        os_added_total = ", ".join(
+            translate(str(item["added"])) 
+            for item in os_additional_list
+        )
+
+        narrative_text += narrative_template_oversampling_active.format(
+            os_target_group=os_target_group,
+            os_added_total=os_added_total
+        )
+    else:
+        narrative_text += narrative_template_oversampling
+        narrative_text += narrative_template_oversampling_inactive
+
+    st.markdown("---")  
+    st.subheader("Përshkrimi i dizajnimit të mostrës")
+
+    with st.expander("Shfaq përshkrimin e dizajnimit të mostrës"):
+        st.markdown(narrative_text)
+
+    
+    narrative_doc = narrative_to_word(narrative_text)
+
+    b64 = base64.b64encode(narrative_doc).decode()
+
+    st.markdown(f"""
+        <a href="data:application/octet-stream;base64,{b64}" download="pershkrimi_mostres.docx">
+            <div style="
+                background-color:#344b77;
+                color:white;
+                text-align:center;
+                font-weight:500;
+                font-size:16px;
+                padding:10px;
+                border-radius:8px;
+                margin-top:10px;
+                cursor:pointer;">
+                Shkarko Narrativën (Word)
+            </div>
+        </a>
+    """, unsafe_allow_html=True)
+
     dims_to_keep = filtered_dims[filtered_dims > 1].index.tolist()
 
     coef_df = coef_df[coef_df["Dimensioni"].isin(dims_to_keep)]
@@ -2581,8 +2837,6 @@ if run_button:
     if coef_df.empty:
         st.warning("Nuk ka asnjë dimension valid për peshim pas filtrave.")
         st.stop()
-
-
 
     st.markdown("---")
     st.subheader("Sintaksa për peshim në SPSS")
