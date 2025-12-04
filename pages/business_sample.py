@@ -18,6 +18,7 @@ The sampling methodology is a two-stage activity consisting of sample design and
 The survey employs a stratified random sampling strategy to ensure that the sample accurately mirrors the structure of the business population. This is achieved through a multi-stage stratification process:
 
 - **Stage I: Geographic Stratification** - The population is first stratified into {first_strata} sub-groups. Sample sizes are determined based on the distribution of the business population, maintaining Probability Proportionate to Size (PPS).
+{stage2_text} 
 """
 
 narrative_template_oversampling = """
@@ -403,10 +404,10 @@ def load_business_data(path: str) -> pd.DataFrame:
 
     # Only active businesses
     if "Statusi" in df.columns:
-        df = df[df["Statusi"].astype(str).str.lower() == "aktiv"]
+        df = df[df["Statusi"].astype(str).str.lower() == "regjistruar"]
 
     # Clean text columns
-    for c in ["Komuna", "Regjioni", "Sektori", "NACE", "Forma juridike", "Madhësia e biznesit"]:
+    for c in ["Komuna", "Regjioni", "Sektori", "Forma juridike", "Madhësia e biznesit","NACE", "Divizioni-NACE", "Grupi-NACE"]:
         if c in df.columns:
             df[c] = df[c].astype(str).str.strip()
 
@@ -428,6 +429,94 @@ def alloc_to_mask(mask: pd.Series, quota: int) -> pd.Series:
     ints = controlled_rounding(floats.to_numpy(), quota, seed)
     out.loc[df_sub.index] = ints
     return out
+
+# Extract categories dynamically from the filtered dataset
+def get_categories(df, var):
+    if var == "N/A" or var not in df.columns:
+        return "N/A"
+    cats = sorted(df[var].dropna().unique().tolist())
+    return ", ".join([str(c) for c in cats])
+
+def build_characteristic_text(df, var):
+    # If no variable selected
+    if var == "N/A" or var is None:
+        return "N/A"
+
+    # Clean guard: if df doesn't have the variable column
+    if var not in df.columns:
+        return "N/A"
+
+    # Characteristic A rules
+    if var == "Madhësia e biznesit":
+        return (
+            "1 = Mikrondërmarrje (0–9 punëtorë), "
+            "2 = Ndërmarrje të vogla (10–49), "
+            "3 = Ndërmarrje të mesme (50–249), "
+            "4 = Ndërmarrje të mëdha (250+)"
+        )
+
+    if var == "Forma juridike":
+        return (
+            "1 = Biznes individual, "
+            "2 = Shoqëri me përgjegjësi të kufizuar (Sh.p.k.), "
+            "3 = Partneritet / Aksionare / Filiale të huaja"
+        )
+
+    # Characteristic B rules
+    if var == "Sektori":
+        return (
+            "four main sectors: "
+            "1 = Trade, 2 = Production, 3 = Services, 4 = Agriculture"
+        )
+
+    if var == "NACE":
+        n = df["NACE"].nunique()
+        return f"all {n} Sections of NACE Rev. 2"
+
+    if var == "Divizioni-NACE":
+        n = df["Divizioni-NACE"].nunique()
+        return f"the {n} Divisions of NACE Rev. 2"
+
+    if var == "Grupi-NACE":
+        n = df["Grupi-NACE"].nunique()
+        return f"all {n} Groups of NACE Rev. 2"
+
+    # Default fallback
+    cats = df[var].dropna().unique().tolist()
+    return ", ".join(cats)
+
+def build_narrative_stage2(charA_var, charB_var, charA_text, charB_text, charA_intro, charB_intro, first_strata, matrix_size):
+    """
+    Dynamically builds Stage II narrative for:
+    - 2 characteristics
+    - 1 characteristic only
+    - 0 characteristics (skip)
+    """
+
+    # CASE 0 — No stratification variables
+    if charA_var == "N/A" and charB_var == "N/A":
+        return ""  # skip Stage II completely
+    
+    # CASE 1 — Only A exists
+    if charA_var != "N/A" and charB_var == "N/A":
+        return f"""
+- **Stage II: Firm Characteristic Stratification**  
+  To enable analytical disaggregation, firms are grouped by one key characteristic:
+
+  - **Characteristic A: {charA_var}** – {charA_intro}Firms are categorized by: {charA_text}.  
+"""
+    
+    # CASE 2 — Both A and B exist
+    return f"""
+- **Stage II: Firm Characteristic Stratification ("Matrix")**  
+  To obtain the broadest possible analytical disaggregation, firms are grouped into *baskets* defined by two key characteristics:  
+
+  - **Characteristic A: {charA_var}** – {charA_intro}Firms are categorized by: {charA_text}.  
+  - **Characteristic B: {charB_var}** – {charB_intro}The stratification encompasses {charB_text}.  
+
+  The resulting matrix structure consists of **{matrix_size} baskets**, combining {charA_var} × {charB_var}, producing detailed quotas for each business type within each {first_strata}.
+"""
+
 
 try:
     df_biz = load_business_data("excel-files/ARBK-bizneset.xlsx")
@@ -463,11 +552,34 @@ first_strata = st.sidebar.selectbox(
 
 second_strata = st.sidebar.multiselect(
     "Zgjidhni variablat për ndarjen e dytë",
-    ["Madhësia e biznesit", "Sektori", "NACE", "Forma juridike"],
+    ["Madhësia e biznesit", "Sektori", "NACE", "Divizioni-NACE", "Grupi-NACE", "Forma juridike"],
     default=["Madhësia e biznesit", "Sektori"]
 )
 
 strata_vars = [first_strata] + second_strata
+# Identify the first two second-level strata as the "matrix" variables
+if len(second_strata) >= 2:
+    charA_var = second_strata[0]
+    charB_var = second_strata[1]
+elif len(second_strata) == 1:
+    charA_var = second_strata[0]
+    charB_var = "N/A"
+else:
+    charA_var = "N/A"
+    charB_var = "N/A"
+
+charA_text = build_characteristic_text(df_biz, charA_var)
+charB_text = build_characteristic_text(df_biz, charB_var)
+
+charA_categories = get_categories(df_biz, charA_var)
+charB_categories = get_categories(df_biz, charB_var)
+
+# Matrix size (A x B)
+if charA_categories != "N/A" and charB_categories != "N/A":
+    matrix_size = f"{len(charA_categories.split(', '))} × {len(charB_categories.split(', '))}"
+else:
+    matrix_size = "N/A"
+
 
 survey_type = st.sidebar.selectbox(
     "Mbledhja e të dhënave",
@@ -487,7 +599,8 @@ filter_options = [
     "Komuna", 
     "Madhësia e biznesit", 
     "NACE", 
-    "Aktivitetet",
+    "Divizioni-NACE", 
+    "Grupi-NACE",
     "Forma juridike",
     "Sektori"
 ]
@@ -547,18 +660,6 @@ if "NACE" in selected_filters:
     )
     if selected_vals:
         df_filtered = df_filtered[df_filtered["NACE"].isin(selected_vals)]
-
-# -----------------------------
-# FILTER: AKTIVITETET
-# -----------------------------
-if "Aktivitetet" in selected_filters:
-    unique_vals = sorted(df_biz["Aktivitetet"].dropna().unique())
-    selected_vals = st.sidebar.multiselect(
-        "Zgjidh Aktivitetet",
-        unique_vals
-    )
-    if selected_vals:
-        df_filtered = df_filtered[df_filtered["Aktivitetet"].isin(selected_vals)]
 
 # -----------------------------
 # FILTER: TIPI I BIZNESIT
@@ -635,7 +736,7 @@ if oversample_enabled:
 
     oversample_vars = st.sidebar.multiselect(
         "Zgjidh deri në 2 variabla për oversample:",
-        ["Komuna", "Madhësia e biznesit", "Sektori"],
+        ["Regjioni","Komuna", "Madhësia e biznesit", "Sektori","Divizioni-NACE"],
         max_selections=2
     )
 
@@ -843,16 +944,101 @@ if run_button:
     df_final = grouped[grouped["n_alloc"] > 0].copy()
     df_final = df_final.drop(columns=["Pop_stratum"])
     df_final = df_final.rename(columns={"n_alloc": "Intervista"})
-    
-    total_row = pd.DataFrame([{
-        **{col: "Total" for col in strata_vars},
-        "Intervista": df_final["Intervista"].sum()
-    }])
 
-    df_final = pd.concat([df_final, total_row], ignore_index=True)
+    if "Madhësia e biznesit" in second_strata:
+        index_col = [col for col in df_final.columns if col not in ["Intervista", "Madhësia e biznesit"]]
+        # Pivot the table
+        pivot_final = (
+            df_final.pivot_table(
+                index=index_col,
+                columns="Madhësia e biznesit",
+                values="Intervista",
+                aggfunc="sum",
+                fill_value=0
+            )
+            .reset_index()
+        )
+
+        # Rename pivoted columns if needed (Intervista is becoming values)
+        pivot_final = pivot_final.rename_axis(None, axis=1)
+
+        # Add Total column (sum of all business size columns)
+        biz_size_cols = [
+            c for c in ["Mikrondërmarrje", "Ndërmarrje e vogël",
+                        "Ndërmarrje e mesme", "Ndërmarrje e madhe"]
+            if c in pivot_final.columns
+        ]
+
+        pivot_final["Total"] = pivot_final[biz_size_cols].sum(axis=1)
+
+        value_cols = [col for col in pivot_final.columns if col not in index_col]
+
+        total_row = {col: "" for col in pivot_final.columns}
+
+        # Label for the total row (you can edit this)
+        total_row[index_col[0]] = "Totali"
+
+        # Sum numeric columns
+        for col in value_cols + ["Total"]:
+            total_row[col] = pivot_final[col].sum()
+
+        # Append row
+        pivot_final = pd.concat([pivot_final, pd.DataFrame([total_row])], ignore_index=True)
+
+    else:
+        if "Sektori" in second_strata:
+            index_col = [col for col in df_final.columns if col not in ["Intervista", "Sektori"]]
+            # Pivot the table
+            pivot_final = (
+                df_final.pivot_table(
+                    index=index_col,
+                    columns="Sektori",
+                    values="Intervista",
+                    aggfunc="sum",
+                    fill_value=0
+                )
+                .reset_index()
+            )
+
+            # Rename pivoted columns if needed (Intervista is becoming values)
+            pivot_final = pivot_final.rename_axis(None, axis=1)
+
+            # Add Total column (sum of all business size columns)
+            biz_size_cols = [
+                "Tregti",
+                "Bujqësi",
+                "Prodhim",
+                "Shërbime"
+            ]
+
+            pivot_final["Total"] = pivot_final[biz_size_cols].sum(axis=1)
+
+            value_cols = [col for col in pivot_final.columns if col not in index_col]
+
+            total_row = {col: "" for col in pivot_final.columns}
+
+            # Label for the total row (you can edit this)
+            total_row[index_col[0]] = "Totali"
+
+            # Sum numeric columns
+            for col in value_cols + ["Total"]:
+                total_row[col] = pivot_final[col].sum()
+
+            # Append row
+            pivot_df = pd.concat([pivot_final, pd.DataFrame([total_row])], ignore_index=True)
+        
+        else:
+            total_row = pd.DataFrame([{
+                **{col: "Total" for col in strata_vars},
+                "Intervista": df_final["Intervista"].sum()
+            }])
+
+            df_final = pd.concat([df_final, total_row], ignore_index=True)
+            pivot_final = df_final
+
 
     st.caption(caption_main)
-    st.dataframe(df_final, use_container_width=True)
+    st.dataframe(pivot_final, use_container_width=True)
 
     excel_bytes_reserve = df_to_excel_bytes(
             df_final, 
@@ -957,6 +1143,7 @@ if run_button:
         reserve_cols = [
             "Emri i biznesit",
             "Numri i telefonit",
+            "Email",
             "Komuna",
             "Regjioni",
             "Forma juridike",
@@ -1041,27 +1228,49 @@ if run_button:
 
     strata_text = ", ".join(strata_vars)
 
-    narrative_text = f"""
-Sample Design – Business Survey
+    economic_activity_vars = [
+    "Sektori",
+    "NACE",
+    "Divizioni-NACE",
+    "Grupi-NACE"
+    ]
 
-Country: Kosovo  
-Survey type: {survey_type}  
-Target completes: {n_total}
+    if charB_var in economic_activity_vars:
+        charB_intro = "Firms are categorized by their primary economic activity. "
+    else:
+        charB_intro = ""
 
-Sampling Population  
-All registered and **active** businesses with valid contact phone numbers.
+    if charA_var in economic_activity_vars:
+        charA_intro = "Firms are categorized by their primary economic activity. "
+    else:
+        charA_intro = ""
 
-Sampling Frame  
-Official business register (ARBK), containing firm ID, region, municipality,  
-legal entity type, NACE sector, size band, and contact information.
+    stage2_text = build_narrative_stage2(
+    charA_var,
+    charB_var,
+    charA_text,
+    charB_text,
+    charA_intro,
+    charB_intro,
+    first_strata,
+    matrix_size
+    )
 
-Stratification  
-Strata used: **{strata_text}**.  
-Interview allocation is proportional to the number of businesses in each stratum.
+    narrative_text = narrative_template_common.format(
+    N=n_total,
+    moe=f"{moe_percent:.2f}%",
+    first_strata=first_strata,
+    stage2_text= stage2_text,
+    matrix_size=matrix_size
+    )
 
-Oversampling  
-{"Oversampling applied." if oversample_enabled else "No oversampling used."}
-"""
+    if oversample_enabled:
+        narrative_text += narrative_template_oversampling
+
+    narrative_text += narrative_template_randomization
+    narrative_text += narrative_template_reserves.format(
+        reserve_size="the selected percentage/proportion"
+    )
 
     with st.expander("Shfaq narrativën"):
         st.markdown(narrative_text)

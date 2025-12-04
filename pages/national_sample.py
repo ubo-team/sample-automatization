@@ -98,7 +98,7 @@ The National Social Survey for Kosovo is based on the principles of {survey_labe
 The sample design is based on a modified multistage random sampling methodology. Crucially, the sampling frame is constructed using a dual-source approach to address recent demographic data challenges:
 
 - **General Population**: For the majority of municipalities, the sample design is based on the preliminary results of the Kosovo Census 2024, conducted by the Kosovo Agency of Statistics (KAS).
-- **Serb-Majority Municipalities**: Due to the significant non-participation of the ethnic Serb community in the 2024 Census, population estimates for Serb-majority municipalities are derived from the 2024 OSCE Municipal Profiles, which provide the most reliable current estimates for these specific areas.
+- **Serb-Majority Municipalities**: Due to the significant non-participation of the ethnic Serb community in the 2024 Census, population estimates for Serb-majority municipalities are derived from the 2018 OSCE Municipal Profiles, which provide the most reliable current estimates for these specific areas.
 
 **Stratification and Quotas**
 
