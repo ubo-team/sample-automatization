@@ -1982,7 +1982,7 @@ settlement_filter = st.sidebar.multiselect(
 # Oversampling
 st.sidebar.markdown("---")
 
-oversample_enabled = st.sidebar.checkbox("Oversample", value=False)
+oversample_enabled = st.sidebar.checkbox("Oversampling", value=False)
 
 oversample_inputs = {}
 
