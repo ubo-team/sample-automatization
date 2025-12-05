@@ -914,7 +914,7 @@ if reserve_mode == "Përqindje (%)":
         value=20,
         step=10
     )
-    reserve_text = f"a size equal to the allocated interviews plus an additional {reserve_percentage}% reserve"
+    reserve_text = f"a size equal to the allocated interviews plus an **additional {reserve_percentage}% reserve**"
 
 elif reserve_mode == "Proporcion":
     reserve_ratio = st.sidebar.number_input(
@@ -924,7 +924,7 @@ elif reserve_mode == "Proporcion":
         value=2,
         step=1
     )
-    reserve_text = f"a size determined using a {reserve_ratio}:1 replacement ratio"    
+    reserve_text = f"a size determined using a **{reserve_ratio}:1 replacement ratio**"    
 
 st.sidebar.markdown("---")
 
@@ -985,10 +985,6 @@ run_button = st.sidebar.button("Gjenero shpërndarjen e mostrës")
 # =====================================================
 
 if run_button:
-
-    caption_main = (
-        f"Totali i mostrës: **{n_total}**"
-    )
 
     # 1) BUILD STRATA POPULATION
     grouped = (
@@ -1114,7 +1110,23 @@ if run_button:
     strata_text = ", ".join(strata_vars)
 
     if oversample_enabled:
-        oversampling_text = ", ".join(oversample_inputs)
+        parts = []
+        for var, entries in oversample_inputs.items():
+            if not entries:
+                continue
+
+            # Extract selected values
+            values = [e["value"] for e in entries]
+
+            if len(values) == 1:
+                value_text = values[0]
+            else:
+                value_text = ", ".join(values)
+
+            parts.append(f"{var} → ({value_text})")
+
+        oversampling_text = "; ".join(parts)
+
     else:
         oversampling_text = "Joaktiv"
 
@@ -1250,7 +1262,6 @@ if run_button:
             pivot_final = df_final
 
 
-    st.caption(caption_main)
     st.dataframe(pivot_final, use_container_width=True)
 
     excel_bytes_reserve = df_to_excel_bytes(

@@ -2522,7 +2522,21 @@ if run_button:
         ethnicity_text = "Shqiptar, Serb, Tjerë"
 
     if oversample_enabled:
-        oversampling_text = ", ".join(oversample_vars)
+        parts = []
+        for var, entries in oversample_inputs.items():
+            values = []
+            for e in entries:
+                if var == "Mosha":
+                    values.append(f"{e['min_age']}–{e['max_age']}")
+                else:
+                    values.append(str(e["value"]))
+
+            # Join multiple values
+            values_text = ", ".join(values)
+
+            parts.append(f"{var} → ({values_text})")
+
+        oversampling_text = "; ".join(parts)
     else:
         oversampling_text = "Joaktiv"
 
