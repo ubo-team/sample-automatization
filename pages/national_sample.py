@@ -129,7 +129,7 @@ narrative_template_oversampling_inactive = """
  For this specific project, no oversampling was applied; the sample strictly follows the proportional population distribution.  
 """
 
-narrative_template_oversampling_active = """
+narrative_template_oversampling_single_active = """
 For this project, we have oversampled the following categories:
 
 - **Target Group:** {os_target_group}
@@ -137,6 +137,18 @@ For this project, we have oversampled the following categories:
 
 Adjustments for this oversampling will be required at the analytical phase.  
 Weights will be applied so that oversampled groups are brought back to their true share in the population (KAS 2024, OSCE 2024).  
+This ensures that national-level estimates remain representative while still allowing reliable subgroup analysis.
+"""
+
+narrative_template_oversampling_multi_active = """
+For this project, we have oversampled we have oversampled the following categories:
+
+{os_group_list}
+
+For these groups, the additional respondents were selected beyond their natural population proportions. The added interviews ensure sufficient analytical precision for each oversampled subgroup.
+
+Adjustments for this oversampling will be required at the analytical phase.  
+Weights will be applied so that oversampled groups are brought back to their true share in the population (KAS 2024, OSCE 2018).  
 This ensures that national-level estimates remain representative while still allowing reliable subgroup analysis.
 """
 
@@ -2801,6 +2813,11 @@ if run_button:
         narrative_text += narrative_template_cati
 
     if oversample_enabled:
+        os_group_list = ""
+        for item in os_additional_list:
+            os_group_list += (
+                f"- **{translate(item['value'])}**: {item['added']} additional interviews  \n"
+            )
         os_target_group = "; ".join(
             f"{translate(item['value'])}" 
             for item in os_additional_list
@@ -2811,10 +2828,16 @@ if run_button:
             for item in os_additional_list
         )
 
-        narrative_text += narrative_template_oversampling_active.format(
-            os_target_group=os_target_group,
-            os_added_total=os_added_total
-        )
+        if len(os_additional_list) == 1:
+            narrative_text += narrative_template_oversampling_single_active.format(
+                os_target_group=os_target_group,
+                os_added_total=os_added_total
+            )
+        else:
+            narrative_text += narrative_template_oversampling_multi_active.format(
+                os_group_list=os_group_list
+            )
+
     else:
         narrative_text += narrative_template_oversampling
         narrative_text += narrative_template_oversampling_inactive
