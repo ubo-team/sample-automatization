@@ -2647,80 +2647,111 @@ if run_button:
         label="Shkarko Shpërndarjen Fillestare"
     )
 
-        # =====================================================
-    # PSU-të vetëm nëse metoda është CAPI dhe niveli kryesor është Komunë
+    # =====================================================
+    # PSU-të për CAPI – tani funksionon si për Komunë ashtu edhe për Regjion
     # =====================================================
     if data_collection_method == "CAPI":
         st.markdown("---")
-        if primary_level != "Komunë":
-            st.info("Llogaritja e PSU-ve është e implementuar vetëm kur ndarja kryesore është sipas **Komunës**.")
-        else:
-            st.subheader("PSU-të e përzgjedhura")
+        st.subheader("PSU-të e përzgjedhura")
 
-            with st.spinner("Duke llogaritur PSU-të..."):
+        # --------------------------------------------
+        # a) Ndërto pivot-in që do përdoret vetëm për PSU
+        #    - nëse ndarja kryesore është Komuna → përdor pivot ekzistues
+        #    - nëse ndarja kryesore është Regjion → ri-aloko N në nivel komune
+        # --------------------------------------------
+        if primary_level == "Komunë":
+            pivot_for_psu = pivot.copy()
+        else:
+            # për Regjion, llogarisim një shpërndarje të thjeshtë të N në nivel Komune
+            # në bazë të Pop_adj (pas filtrave)
+            df_mun_pop = df.groupby("Komuna")["Pop_adj"].sum()
+
+            # siguri – hiq komuna me 0 populacion
+            df_mun_pop = df_mun_pop[df_mun_pop > 0]
+
+            if df_mun_pop.empty:
+                st.warning("Nuk mund të llogariten PSU sepse nuk ka popullsi valide në nivel komune.")
+                psu_table = pd.DataFrame()
+            else:
+                weights_mun = df_mun_pop / df_mun_pop.sum()
+                floats = weights_mun * n_total
+                totals = controlled_rounding(floats.to_numpy(), n_total, seed)
+
+                pivot_for_psu = pd.DataFrame(
+                    {"Total": totals},
+                    index=df_mun_pop.index
+                )
+                pivot_for_psu.loc["Total"] = pivot_for_psu.sum()
+
+        with st.spinner("Duke llogaritur PSU-të..."):
+            if "pivot_for_psu" in locals():
                 psu_table = compute_psu_table_for_all_municipalities(
-                    pivot=pivot,
+                    pivot=pivot_for_psu,
                     df_psu=df_psu,
                     k=interviews_per_psu,
                     eth_filter=eth_filter,
                     settlement_filter=settlement_filter,
                 )
-
-
-            if psu_table.empty:
-                st.warning("Nuk u gjeneruan PSU. Kontrollo filtrat, fajllin e PSU-ve dhe shpërndarjen e mostrës.")
             else:
-                st.caption(
-                    f"PSU-të janë llogaritur me **{interviews_per_psu} intervista** për PSU sipas rregullit të përcaktuar."
-                )
-                st.dataframe(psu_table, use_container_width=True)
+                psu_table = pd.DataFrame()
 
-                psu_excel = df_to_excel_bytes(psu_table, sheet_name="PSU")
-                create_download_link2(
-                    file_bytes=psu_excel,
-                    filename="psu_capi_tegjitha_komunat.xlsx",
-                    label="Shkarko PSU-të"
-                )
+        if psu_table.empty:
+            st.warning("Nuk u gjeneruan PSU. Kontrollo filtrat, fajllin e PSU-ve dhe shpërndarjen e mostrës.")
+        else:
+            st.caption(
+                f"PSU-të janë llogaritur me **{interviews_per_psu} intervista** për PSU sipas rregullit të përcaktuar."
+            )
+            st.dataframe(psu_table, use_container_width=True)
 
-        st.subheader("Harta e PSU-ve të përzgjedhura")
+            psu_excel = df_to_excel_bytes(psu_table, sheet_name="PSU")
+            create_download_link2(
+                file_bytes=psu_excel,
+                filename="psu_capi_tegjitha_komunat.xlsx",
+                label="Shkarko PSU-të"
+            )
+
+        # =====================================================
+        # Harta – gjithmonë nëse kemi psu_table, pavarësisht ndarjes kryesore
+        # =====================================================
+        if not psu_table.empty:
+            st.subheader("Harta e PSU-ve të përzgjedhura")
 
             # Remove the artificial urban row BEFORE merging with coordinates
-        df_map = psu_table[["Komuna", "Fshati/Qyteti", "Intervista"]].copy()
-        df_map.loc[df_map["Fshati/Qyteti"] == "Urban", "Fshati/Qyteti"] = \
-        df_map.loc[df_map["Fshati/Qyteti"] == "Urban", "Komuna"]
-
+            df_map = psu_table[["Komuna", "Fshati/Qyteti", "Intervista"]].copy()
+            df_map.loc[df_map["Fshati/Qyteti"] == "Urban", "Fshati/Qyteti"] = \
+                df_map.loc[df_map["Fshati/Qyteti"] == "Urban", "Komuna"]
 
             # Merge with PSU coordinates
-        df_map = df_map.merge(
+            df_map = df_map.merge(
                 df_psu[["Komuna", "Fshati/Qyteti", "lat", "long"]],
                 on=["Komuna", "Fshati/Qyteti"],
                 how="left"
             )
 
-        layer = pdk.Layer(
-            "ScatterplotLayer",
-            data=df_map,
-            get_position='[long, lat]',
-            get_fill_color='[200, 30, 0, 160]',
-            get_radius=600,
-            pickable=True
-        )
+            layer = pdk.Layer(
+                "ScatterplotLayer",
+                data=df_map,
+                get_position='[long, lat]',
+                get_fill_color='[200, 30, 0, 160]',
+                get_radius=600,
+                pickable=True
+            )
 
-        view_state = pdk.ViewState(
-            latitude=df_map["lat"].mean(),
-            longitude=df_map["long"].mean(),
-            zoom=8
-        )
+            view_state = pdk.ViewState(
+                latitude=df_map["lat"].mean(),
+                longitude=df_map["long"].mean(),
+                zoom=8
+            )
 
-        deck = pdk.Deck(
-            layers=[layer],
-            initial_view_state=view_state,
-            map_provider="carto",     
-            map_style="light",        
-            tooltip={"html": "<b>{Komuna}</b><br>{Fshati/Qyteti}</b><br>{Intervista} intervista"}
-        )
+            deck = pdk.Deck(
+                layers=[layer],
+                initial_view_state=view_state,
+                map_provider="carto",
+                map_style="light",
+                tooltip={"html": "<b>{Komuna}</b><br>{Fshati/Qyteti}</b><br>{Intervista} intervista"}
+            )
 
-        st.pydeck_chart(deck)
+            st.pydeck_chart(deck)
 
     # COMMON SECTION (always included)
     if not oversample_enabled:
