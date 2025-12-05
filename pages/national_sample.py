@@ -11,6 +11,7 @@ from docx import Document
 from docx.shared import Pt
 from docx.enum.text import WD_BREAK
 import re
+from docx.enum.text import WD_ALIGN_PARAGRAPH
 
 st.markdown("""
     <div style='width: 100%; padding: 20px 30px; background: #ffffff;
@@ -1239,10 +1240,6 @@ def compute_filtered_pop_for_psu_row(
 
     return max(final_pop, 0)
 
-
-from docx import Document
-from docx.enum.text import WD_ALIGN_PARAGRAPH
-import re
 
 def add_markdown_runs(paragraph, text):
     """Adds runs with markdown formatting: bold, italic, bold+italic."""

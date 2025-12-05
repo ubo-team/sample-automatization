@@ -4,6 +4,12 @@ import numpy as np
 import base64
 from io import BytesIO
 from docx import Document
+from docx import Document
+from docx import Document
+from docx.shared import Pt
+from docx.enum.text import WD_BREAK
+from docx.enum.text import WD_ALIGN_PARAGRAPH
+import re
 
 narrative_template_common = """
 **Sampling Universe**
@@ -12,23 +18,14 @@ An up-to-date list of active businesses from the Kosovo Business Registration Ag
 
 **Sampling Methodology**
 
-The sampling methodology is a two-stage activity consisting of sample design and the selection of businesses to populate sample quotas. UBO Consulting is proposing a sample size of {N} businesses across Kosovo. The selection follows a rigorous approach to obtain a representative and unbiased survey sample, allowing findings to be generalized to the entire population of Kosovan businesses within a given power of statistical precision of a margin of error of {moe} at a 95% confidence interval.
+The sampling methodology is a two-stage activity consisting of sample design and the selection of businesses to populate sample quotas. UBO Consulting is proposing a sample size of **{N} businesses** across Kosovo. The selection follows a rigorous approach to obtain a representative and unbiased survey sample, allowing findings to be generalized to the entire population of Kosovan businesses within a given power of statistical precision of a margin of error of **{moe}** at a 95% confidence interval.
 
 **Stratification Strategy**
+
 The survey employs a stratified random sampling strategy to ensure that the sample accurately mirrors the structure of the business population. This is achieved through a multi-stage stratification process:
 
 - **Stage I: Geographic Stratification** - The population is first stratified into {first_strata} sub-groups. Sample sizes are determined based on the distribution of the business population, maintaining Probability Proportionate to Size (PPS).
 {stage2_text} 
-"""
-
-narrative_template_oversampling = """
-**Oversampling Procedures** 
-
-This survey employs a deliberate oversampling strategy to ensure robust data quality across all key analytical categories. For this, we apply **Disproportionate Stratified Sampling**:
-
-- Base Quota: The general population is sampled according to its natural distribution.
-- Boost Quota: The [Insert Target Group] is assigned a forced minimum quota (oversample) to ensure enough observations are collected to allow for valid comparisons between [Insert Comparison Categories, e.g., size classes / regions / sectors].
-Adjustments for this oversampling will be handled during the analytical phase using post-stratification weights. This ensures that while the sample contains enough members of the target group for detailed analysis, the final results are weighted back to reflect the actual proportions of the Kosovo economy.
 """
 
 narrative_template_randomization = """
@@ -40,7 +37,7 @@ In the final stage, the quotas for each basket type are populated using a **syst
 narrative_template_reserves = """
 **Replacement Strategy**
 
-A reserve list of businesses for each basket is generated to serve as potential replacements during data collection. Recognizing that administrative lists may contain inactive businesses or inaccurate contact details—or that representatives may refuse participation—reserve lists will be used strictly as equivalent replacements (within the exact same basket/stratum) to maintain sample integrity. To ensure fieldwork continuity without the need for re-sampling, the reserve list is generated with a size of {reserve_size}, depending on the anticipated non-response and ineligibility rates for each specific stratum.
+A reserve list of businesses for each basket is generated to serve as potential replacements during data collection. Recognizing that administrative lists may contain inactive businesses or inaccurate contact details—or that representatives may refuse participation—reserve lists will be used strictly as equivalent replacements (within the exact same basket/stratum) to maintain sample integrity. To ensure fieldwork continuity without the need for re-sampling, the reserve list is generated with {reserve_size}, depending on the anticipated non-response and ineligibility rates for each specific stratum.
 """
 
 # =====================================================
@@ -136,10 +133,79 @@ def create_download_link2(file_bytes: bytes, filename: str, label: str):
     st.markdown(button_html, unsafe_allow_html=True)
 
 
-def narrative_to_word(text: str) -> bytes:    
+def add_markdown_runs(paragraph, text):
+    """Adds runs with markdown formatting: bold, italic, bold+italic."""
+    bold_italic = r"\*\*\*(.+?)\*\*\*"
+    bold = r"\*\*(.+?)\*\*"
+    italic = r"\*(.+?)\*"
+
+    tokens = re.split(r"(\*\*\*.+?\*\*\*|\*\*.+?\*\*|\*.+?\*)", text)
+
+    for token in tokens:
+        run = paragraph.add_run()
+        if re.match(bold_italic, token):
+            run.text = re.findall(bold_italic, token)[0]
+            run.bold = True
+            run.italic = True
+        elif re.match(bold, token):
+            run.text = re.findall(bold, token)[0]
+            run.bold = True
+        elif re.match(italic, token):
+            run.text = re.findall(italic, token)[0]
+            run.italic = True
+        else:
+            run.text = token
+
+def narrative_to_word(markdown_text: str) -> bytes:
     doc = Document()
-    for line in text.split("\n"):
-        doc.add_paragraph(line)
+
+    # REMOVE double blank lines (convert them to a single paragraph)
+    lines = markdown_text.split("\n")
+    cleaned_lines = []
+    skip_next = False
+
+    for i in range(len(lines)):
+        if i < len(lines) - 1 and lines[i].strip() == "" and lines[i+1].strip() == "":
+            # skip multiple blank lines
+            if not skip_next:
+                cleaned_lines.append("")  # keep one blank line
+            skip_next = True
+        else:
+            cleaned_lines.append(lines[i])
+            skip_next = False
+
+    # CONVERT TO WORD PARAGRAPHS
+    for line in cleaned_lines:
+
+        # ----- HEADINGS (keep centered/left as Word default) -----
+        if line.startswith("### "):
+            doc.add_heading(line[4:], level=3)
+            continue
+        elif line.startswith("## "):
+            doc.add_heading(line[3:], level=2)
+            continue
+        elif line.startswith("# "):
+            doc.add_heading(line[2:], level=1)
+            continue
+
+        # ----- BULLET POINTS -----
+        if line.strip().startswith("- "):
+            p = doc.add_paragraph(style="List Bullet")
+            p.alignment = WD_ALIGN_PARAGRAPH.JUSTIFY
+            add_markdown_runs(p, line.strip()[2:])
+            continue
+
+        # ----- BLANK LINE -----
+        if line.strip() == "":
+            continue
+
+        # ----- NORMAL PARAGRAPH -----
+        p = doc.add_paragraph()
+        add_markdown_runs(p, line)
+        p.alignment = WD_ALIGN_PARAGRAPH.JUSTIFY
+
+    # Return bytes file
+    from io import BytesIO
     buffer = BytesIO()
     doc.save(buffer)
     return buffer.getvalue()
@@ -304,6 +370,70 @@ def add_codes_to_business_wdf(wdf):
 
     return wdf
 
+def build_oversampling_narrative(oversample_inputs, translate_variable):
+    """
+    Creates a dynamic narrative for oversampling with:
+    - Up to 2 oversampling variables
+    - Multiple selected target categories per variable
+    - Clean pluralization ("target groups")
+    """
+
+    if not oversample_inputs:
+        return ""
+
+    parts = []  # holds block-level descriptions
+
+    for var, entries in oversample_inputs.items():
+        if not entries:
+            continue
+
+        var_eng = translate_variable(var)
+        values = [e["value"] for e in entries]
+
+        # Format the list of target categories
+        if len(values) == 1:
+            value_text = f"**{values[0]}**"
+
+        elif len(values) == 2:
+            value_text = f"**{values[-2]}** and **{values[-1]}**"
+        
+        else:
+            value_text = ", ".join(values[:-1]) + f", and **{values[-1]}**"
+
+        parts.append(f"{value_text} within **{var_eng}**")
+
+    # If nothing inside, skip
+    if not parts:
+        return ""
+
+    # JOIN ALL TARGET GROUP DEFINITIONS
+    if len(parts) == 1:
+        targets_text = "The **target group** " + parts[0] + " is"
+    else:
+        targets_text = "The **target groups**: " + "; ".join(parts) + " are"
+
+    # COMPARISON CATEGORIES
+    comparison_vars = [translate_variable(v) for v in oversample_inputs.keys()]
+
+    if len(comparison_vars) == 1:
+        comparison_text = comparison_vars[0]
+    else:
+        comparison_text = ", ".join(comparison_vars[:-1]) + f", and {comparison_vars[-1]}"
+
+    # FINAL NARRATIVE
+    dynamic_text = f"""
+**Oversampling Procedures**
+
+This survey employs a deliberate oversampling strategy to ensure robust data quality across key analytical categories, applying **Disproportionate Stratified Sampling**.
+
+- **Base Quota:** The general business population is sampled according to its natural distribution.
+- **Boost Quota:** {targets_text} assigned a forced minimum quota (oversample) to ensure sufficient observations for valid comparisons across **{comparison_text}**.
+
+Post-stratification weighting will correct for this deliberate disproportionality, ensuring the final survey estimates reflect the true structure of the Kosovo business population.
+"""
+
+    return dynamic_text
+
 
 # =====================================================
 # CONFIG & PAGE STYLE
@@ -437,7 +567,7 @@ def get_categories(df, var):
     cats = sorted(df[var].dropna().unique().tolist())
     return ", ".join([str(c) for c in cats])
 
-def build_characteristic_text(df, var):
+def build_characteristic_text(df, var, selected_vals_biz, selected_vals_sector):
     # If no variable selected
     if var == "N/A" or var is None:
         return "N/A"
@@ -448,25 +578,46 @@ def build_characteristic_text(df, var):
 
     # Characteristic A rules
     if var == "Madhësia e biznesit":
-        return (
-            "1 = Mikrondërmarrje (0–9 punëtorë), "
-            "2 = Ndërmarrje të vogla (10–49), "
-            "3 = Ndërmarrje të mesme (50–249), "
-            "4 = Ndërmarrje të mëdha (250+)"
-        )
+        biz_size_vars = ""
+        if "Mikrondërmarrje" not in selected_vals_biz or selected_vals_biz==[]:
+            biz_size_vars += "Microenterprise (0–9 employees), "
+        
+        if "Ndërmarrje e vogël" not in selected_vals_biz or selected_vals_biz==[]:
+            biz_size_vars += "Small enterprises (10–49), "
+
+        if "Ndërmarrje e mesme" not in selected_vals_biz or selected_vals_biz==[]:
+            biz_size_vars += "Medium-sized enterprises (50–249), "
+
+        if "Ndërmarrje e madhe" not in selected_vals_biz or selected_vals_biz==[]:
+            biz_size_vars += "Large enterprises (250+)"
+        
+        return biz_size_vars
 
     if var == "Forma juridike":
-        return (
-            "1 = Biznes individual, "
-            "2 = Shoqëri me përgjegjësi të kufizuar (Sh.p.k.), "
-            "3 = Partneritet / Aksionare / Filiale të huaja"
-        )
+        n = df["Forma juridike"].nunique()
+        return (f"all {n} legal forms")
 
     # Characteristic B rules
     if var == "Sektori":
+        sector_size_vars = ""
+
+        if "Tregti" in selected_vals_sector or selected_vals_sector==[]:
+            sector_size_vars += "Trade, "
+        
+        if "Prodhim" in selected_vals_sector or selected_vals_sector==[]:
+            sector_size_vars += "Production, "
+
+        if "Shërbime" in selected_vals_sector or selected_vals_sector==[]:
+            sector_size_vars += "Services, "
+
+        if "Bujqësi" in selected_vals_sector or selected_vals_sector==[]:
+            sector_size_vars += "Agriculture"
+
+        n = df["Sektori"].nunique()
+
         return (
-            "four main sectors: "
-            "1 = Trade, 2 = Production, 3 = Services, 4 = Agriculture"
+            f"{n} main sectors: "
+            f"Trade, Production, Services, Agriculture"
         )
 
     if var == "NACE":
@@ -516,7 +667,50 @@ def build_narrative_stage2(charA_var, charB_var, charA_text, charB_text, charA_i
 
   The resulting matrix structure consists of **{matrix_size} baskets**, combining {charA_var} × {charB_var}, producing detailed quotas for each business type within each {first_strata}.
 """
+def translate(var: str) -> str:
+    """
+    Translate dataset variable names (Albanian) to English narrative labels.
+    If variable is not known or is 'N/A', return as-is.
+    """
 
+    if var is None or var == "N/A":
+        return "N/A"
+
+    translations = {
+        "Regjioni": "Region",
+        "Komuna": "Municipality",
+
+        # Business attributes
+        "Madhësia e biznesit": "Business Size",
+        "Mikrondërmarrje": "Microenterprise (0–9 employees)",
+        "Ndërmarrje e vogël": "Small enterprises (10–49 employees)",
+        "Ndërmarrje e mesme": "Medium-sized enterprises (50–249 employees)",
+        "Ndërmarrje e madhe": "Large enterprises (More than 250+ employees)",
+        "Forma juridike": "Legal Form",
+        "Sektori": "Sector",
+        "Tregti": "Trade",
+        "Prodhim": "Production",
+        "Services": "Agriculture",
+
+        # NACE-based classifications
+        "NACE": "NACE Section",
+        "Divizioni-NACE": "NACE Division",
+        "Grupi-NACE": "NACE Group",
+
+        #Region
+        "Regjioni i Prishtinës": "Pristina Region",
+        "Regjioni i Mitrovicës": "Mitrovica Region",
+        "Regjioni i Pejës": "Peja Region",
+        "Regjioni i Prizrenit": "Prizren Region",
+        "Regjioni i Ferizajit": "Ferizaj Region",
+        "Regjioni i Gjilanit": "Gjilan Region",
+        "Regjioni i Gjakovës": "Gjakova Region",
+
+
+
+    }
+
+    return translations.get(var, var)
 
 try:
     df_biz = load_business_data("excel-files/ARBK-bizneset.xlsx")
@@ -547,7 +741,7 @@ n_total = st.sidebar.number_input(
 first_strata = st.sidebar.selectbox(
     "Zgjidh variablën për ndarjen e parë",
     ["Regjioni", "Komuna"],
-    index=1
+    index=0
 )
 
 second_strata = st.sidebar.multiselect(
@@ -557,29 +751,6 @@ second_strata = st.sidebar.multiselect(
 )
 
 strata_vars = [first_strata] + second_strata
-# Identify the first two second-level strata as the "matrix" variables
-if len(second_strata) >= 2:
-    charA_var = second_strata[0]
-    charB_var = second_strata[1]
-elif len(second_strata) == 1:
-    charA_var = second_strata[0]
-    charB_var = "N/A"
-else:
-    charA_var = "N/A"
-    charB_var = "N/A"
-
-charA_text = build_characteristic_text(df_biz, charA_var)
-charB_text = build_characteristic_text(df_biz, charB_var)
-
-charA_categories = get_categories(df_biz, charA_var)
-charB_categories = get_categories(df_biz, charB_var)
-
-# Matrix size (A x B)
-if charA_categories != "N/A" and charB_categories != "N/A":
-    matrix_size = f"{len(charA_categories.split(', '))} × {len(charB_categories.split(', '))}"
-else:
-    matrix_size = "N/A"
-
 
 survey_type = st.sidebar.selectbox(
     "Mbledhja e të dhënave",
@@ -646,9 +817,11 @@ if "Madhësia e biznesit" in selected_filters:
         "Zgjidh Kategorinë",
         unique_vals
     )
+    selected_vals_biz = selected_vals
     if selected_vals:
         df_filtered = df_filtered[df_filtered["Madhësia e biznesit"].isin(selected_vals)]
-
+else:
+    selected_vals_biz = []
 # -----------------------------
 # FILTER: NACE
 # -----------------------------
@@ -682,10 +855,12 @@ if "Sektori" in selected_filters:
         "Zgjidh Sektorin",
         unique_vals
     )
+    selected_vals_sector = selected_vals
     if selected_vals:
         df_filtered = df_filtered[df_filtered["Sektori"].isin(selected_vals)]
 
-
+else:
+    selected_vals_sector = []
 # =====================================================
 # REPLACE MAIN POPULATION WITH FILTERED VERSION
 # =====================================================
@@ -694,6 +869,29 @@ if df_filtered.empty:
     st.stop()
 
 df_biz = df_filtered
+
+# Identify the first two second-level strata as the "matrix" variables
+if len(second_strata) >= 2:
+    charA_var = second_strata[0]
+    charB_var = second_strata[1]
+elif len(second_strata) == 1:
+    charA_var = second_strata[0]
+    charB_var = "N/A"
+else:
+    charA_var = "N/A"
+    charB_var = "N/A"
+
+charA_text = build_characteristic_text(df_biz, charA_var, selected_vals_biz, selected_vals_sector)
+charB_text = build_characteristic_text(df_biz, charB_var, selected_vals_biz, selected_vals_sector)
+
+charA_categories = get_categories(df_biz, charA_var)
+charB_categories = get_categories(df_biz, charB_var)
+
+# Matrix size (A x B)
+if charA_categories != "N/A" and charB_categories != "N/A":
+    matrix_size = f"{len(charA_categories.split(', '))} × {len(charB_categories.split(', '))}"
+else:
+    matrix_size = "N/A"
 
 st.sidebar.markdown("---")
 
@@ -716,6 +914,7 @@ if reserve_mode == "Përqindje (%)":
         value=20,
         step=10
     )
+    reserve_text = f"a size equal to the allocated interviews plus an additional {reserve_percentage}% reserve"
 
 elif reserve_mode == "Proporcion":
     reserve_ratio = st.sidebar.number_input(
@@ -725,7 +924,7 @@ elif reserve_mode == "Proporcion":
         value=2,
         step=1
     )
-
+    reserve_text = f"a size determined using a {reserve_ratio}:1 replacement ratio"    
 
 st.sidebar.markdown("---")
 
@@ -739,6 +938,20 @@ if oversample_enabled:
         ["Regjioni","Komuna", "Madhësia e biznesit", "Sektori","Divizioni-NACE"],
         max_selections=2
     )
+
+    # -----------------------------------------
+    # WARNING: Oversample variable not in strata
+    # -----------------------------------------
+
+    invalid_os_vars = [v for v in oversample_vars if v not in strata_vars]
+
+    if invalid_os_vars:
+        st.sidebar.warning(
+            "Variablat që janë zgjedhur në oversampling por nuk janë përfshirë në ndarje: "
+            + ", ".join(invalid_os_vars)
+            + ".\n\nJu lutem shtojini ato si ndarje të parë ose të dytë, përndryshe oversampling nuk mund të zbatohet."
+        )
+
 
     for var in oversample_vars:
 
@@ -1181,6 +1394,73 @@ if run_button:
 
 
     # =====================================================
+    # NARRATIVE
+    # =====================================================
+
+    st.markdown("---")
+    st.subheader("Përshkrimi i dizajnimit të mostrës")
+
+    strata_text = ", ".join(strata_vars)
+
+    economic_activity_vars = [
+    "Sektori",
+    "NACE",
+    "Divizioni-NACE",
+    "Grupi-NACE"
+    ]
+
+    if charB_var in economic_activity_vars:
+        charB_intro = "Firms are categorized by their primary economic activity. "
+    else:
+        charB_intro = ""
+
+    if charA_var in economic_activity_vars:
+        charA_intro = "Firms are categorized by their primary economic activity. "
+    else:
+        charA_intro = ""
+    
+    charA_var_eng = translate(charA_var)
+    charB_var_eng = translate(charA_var)
+
+    stage2_text = build_narrative_stage2(
+    charA_var_eng,
+    charB_var_eng,
+    charA_text,
+    charB_text,
+    charA_intro,
+    charB_intro,
+    first_strata,
+    matrix_size
+    )
+
+    narrative_text = narrative_template_common.format(
+    N=n_total,
+    moe=f"{moe_percent:.2f}%",
+    first_strata=first_strata,
+    stage2_text= stage2_text,
+    matrix_size=matrix_size
+    )
+
+    if oversample_enabled:
+        oversample_text = build_oversampling_narrative(oversample_inputs, translate)
+        narrative_text += oversample_text
+
+    narrative_text += narrative_template_randomization
+    narrative_text += narrative_template_reserves.format(
+        reserve_size=reserve_text
+    )
+
+    with st.expander("Shfaq narrativën"):
+        st.markdown(narrative_text)
+
+    narrative_doc = narrative_to_word(narrative_text)
+    create_download_link(
+        narrative_doc,
+        "Narrativa_Mostra_Biznese.docx",
+        "Shkarko Narrativën (Word)"
+    )
+
+    # =====================================================
     # WEIGHTING TABLE
     # =====================================================
     weighting_vars = ["Regjioni", "Sektori", "Madhësia e biznesit"]
@@ -1218,69 +1498,6 @@ if run_button:
             filename="peshat_biznese.sps",
             label="Shkarko Peshat për SPSS"
         )
-
-    # =====================================================
-    # NARRATIVE
-    # =====================================================
-
-    st.markdown("---")
-    st.subheader("Përshkrimi i dizajnimit të mostrës")
-
-    strata_text = ", ".join(strata_vars)
-
-    economic_activity_vars = [
-    "Sektori",
-    "NACE",
-    "Divizioni-NACE",
-    "Grupi-NACE"
-    ]
-
-    if charB_var in economic_activity_vars:
-        charB_intro = "Firms are categorized by their primary economic activity. "
-    else:
-        charB_intro = ""
-
-    if charA_var in economic_activity_vars:
-        charA_intro = "Firms are categorized by their primary economic activity. "
-    else:
-        charA_intro = ""
-
-    stage2_text = build_narrative_stage2(
-    charA_var,
-    charB_var,
-    charA_text,
-    charB_text,
-    charA_intro,
-    charB_intro,
-    first_strata,
-    matrix_size
-    )
-
-    narrative_text = narrative_template_common.format(
-    N=n_total,
-    moe=f"{moe_percent:.2f}%",
-    first_strata=first_strata,
-    stage2_text= stage2_text,
-    matrix_size=matrix_size
-    )
-
-    if oversample_enabled:
-        narrative_text += narrative_template_oversampling
-
-    narrative_text += narrative_template_randomization
-    narrative_text += narrative_template_reserves.format(
-        reserve_size="the selected percentage/proportion"
-    )
-
-    with st.expander("Shfaq narrativën"):
-        st.markdown(narrative_text)
-
-    narrative_doc = narrative_to_word(narrative_text)
-    create_download_link(
-        narrative_doc,
-        "Narrativa_Mostra_Biznese.docx",
-        "Shkarko Narrativën (Word)"
-    )
 
 else:
     st.info("Cakto parametrat kryesorë dhe kliko **'Gjenero shpërndarjen e mostrës'** për të dizajnuar mostrën.")
