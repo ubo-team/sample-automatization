@@ -640,35 +640,18 @@ def fix_minimum_allocations(
     # Detect ethnicity structure automatically
     ##############################################################
 
-    # These are the possible ethnicity forms
     eth_basic = ["Shqiptar", "Serb", "Tjerë"]
-    eth_urban = [f"{e} - Urban" for e in eth_basic]
-    eth_rural = [f"{e} - Rural" for e in eth_basic]
 
-    available_cols = set(pivot_fixed.columns)
+    eth_groups = {}
+    for eth in eth_basic:
+        cols_for_eth = [c for c in pivot_fixed.columns if str(c).startswith(eth)]
+        if cols_for_eth:
+            eth_groups[eth] = cols_for_eth
 
-    # Case A – full ethnicity × settlement exists (Shqiptar - Urban, Serb - Rural, ...)
-    if all(col in available_cols for col in eth_urban + eth_rural):
-        eth_structure = "eth_settlement"
-        eth_groups = {
-            "Shqiptar": ["Shqiptar - Urban", "Shqiptar - Rural"],
-            "Serb":     ["Serb - Urban", "Serb - Rural"],
-            "Tjerë":    ["Tjerë - Urban", "Tjerë - Rural"]
-        }
-
-    # Case B – only ethnicity, no settlement (Shqiptar, Serb, Tjerë)
-    elif all(e in available_cols for e in eth_basic):
-        eth_structure = "eth_only"
-        eth_groups = {
-            "Shqiptar": ["Shqiptar"],
-            "Serb":     ["Serb"],
-            "Tjerë":    ["Tjerë"]
-        }
-
-    # Case C – no usable ethnicity structure → skip ethnicity logic entirely
+    if eth_groups:
+        eth_structure = "eth_dynamic"
     else:
         eth_structure = "none"
-        eth_groups = {}
 
     # ------------------------------------------------------
     # If there is no usable ethnicity structure, exit early
@@ -1593,7 +1576,6 @@ def create_download_link2(file_bytes: bytes, filename: str, label: str):
             </a>
         """
     st.markdown(button_html, unsafe_allow_html=True)
-
 def compute_population_coefficients(
     df_ga,
     df_eth,
@@ -1614,14 +1596,20 @@ def compute_population_coefficients(
     - Grupmosha
     - Vendbanimi
     - Etnia
-    Vetëm nëse dimensioni ka ≥ 2 kategori me pop > 0.
+
+    Tani përfshin:
+    - Derived Population for Ethnicity/Settlement filters
+    - Derived Population for Age/Gender filters
+    - Përdor logjikën e Dizajnimit të Mostrës
     """
 
     out = []
 
     # ---------------------------------------------------
-    # Prepare df_eth and df_ga based on filters
+    # 0) Përgatitja e dataset-eve të filtruara
     # ---------------------------------------------------
+
+    # df_eth për Etninë / Vendbanimin
     df_pop = df_eth.copy()
     df_pop = df_pop[df_pop["Etnia"].isin(eth_filter)]
     df_pop = df_pop[df_pop["Vendbanimi"].isin(settlement_filter)]
@@ -1630,112 +1618,130 @@ def compute_population_coefficients(
     if df_pop.empty:
         return pd.DataFrame()
 
-    # df_ga
-    df_age = df_ga[df_ga["Komuna"].isin(komuna_filter)]
+    # df_ga për Moshë / Gjini
+    df_age = df_ga.copy()
+    df_age = df_age[df_age["Komuna"].isin(komuna_filter)]
     df_age = df_age[df_age["Gjinia"].isin(gender_selected)]
 
     if df_age.empty:
         return pd.DataFrame()
 
-    # Age columns
+    # Përgatit kolonat e moshave
     age_cols = [c for c in df_age.columns if str(c).isdigit()]
 
-    # max_age automatic for CAWI
+    # CAWI → max_age automatic
     if data_collection_method == "CAWI" and max_age is None:
         max_age = 120
 
     if max_age is None:
         max_age = max(map(int, age_cols))
 
-    # Filter age columns
     age_mask_cols = [c for c in age_cols if min_age <= int(c) <= max_age]
-
     df_age["Pop_age"] = df_age[age_mask_cols].sum(axis=1)
 
+    # Bazë komunash (totali real)
+    pop_base_kom = df_eth.groupby("Komuna")["Pop_base"].sum()
+
     # ---------------------------------------------------
-    # Helper to add dimension blocks safely
+    # 1) DERIVED POPULATION FOR ETHNICITY + SETTLEMENT FILTERS
+    # ---------------------------------------------------
+    total_pop_base = df_eth["Pop_base"].sum()
+    total_pop_filtered = df_pop["Pop_base"].sum()
+
+    coef_eth = total_pop_filtered / total_pop_base if total_pop_base > 0 else 1
+    pop_komuna_derived_eth = pop_base_kom * coef_eth
+
+    # ---------------------------------------------------
+    # 2) DERIVED POPULATION FOR GENDER + AGE FILTERS
+    # ---------------------------------------------------
+    df_ga["Pop_all_age"] = df_ga[age_cols].sum(axis=1)
+    total_age_base = df_ga["Pop_all_age"].sum()
+    total_age_filtered = df_age["Pop_age"].sum()
+
+    coef_age = total_age_filtered / total_age_base if total_age_base > 0 else 1
+    pop_komuna_derived_age = pop_base_kom * coef_age
+
+    # ---------------------------------------------------
+    # Decide which derived population is dominant
+    # ---------------------------------------------------
+    use_age_gender_derivation = (
+        (gender_selected and len(gender_selected) < df_ga["Gjinia"].nunique()) or
+        (min_age > 0 or max_age < 120)
+    )
+
+    final_pop_kom = (
+        pop_komuna_derived_age if use_age_gender_derivation else pop_komuna_derived_eth
+    )
+
+    # ---------------------------------------------------
+    #  Helper to insert block of weights safely
     # ---------------------------------------------------
     def append_block(dim, pop_series):
-        """
-        Adds dimension only if ≥2 categories AND total pop > 0.
-        Removes categories with Pop=0 before checking.
-        """
-        # Remove categories with zero population
         pop_series = pop_series[pop_series > 0]
 
         if len(pop_series) < 2:
-            return  # ← SKIP dimension
+            return
 
         total = pop_series.sum()
         if total == 0:
-            return  # ← Prevent ZeroDivisionError
+            return
 
-        coef_series = pop_series / total
+        coefs = pop_series / total
 
         for cat, pop in pop_series.items():
             out.append({
                 "Dimensioni": dim,
                 "Kategoria": cat,
                 "Populacioni": pop,
-                "Pesha": float(coef_series[cat])
+                "Pesha": float(coefs[cat])
             })
 
     # ---------------------------------------------------
-    # 1) Komuna
+    # 3) Komuna (përdor derived population)
     # ---------------------------------------------------
-    pop_kom = df_pop.groupby("Komuna")["Pop_base"].sum()
-    append_block("Komuna", pop_kom)
+    append_block("Komuna", final_pop_kom)
 
     # ---------------------------------------------------
-    # 2) Regjion
+    # 4) Regjion
     # ---------------------------------------------------
     df_pop["Regjion"] = df_pop["Komuna"].map(region_map)
     pop_reg = df_pop.groupby("Regjion")["Pop_base"].sum()
     append_block("Regjion", pop_reg)
 
     # ---------------------------------------------------
-    # 3) Etnia
+    # 5) Etnia
     # ---------------------------------------------------
     pop_eth = df_pop.groupby("Etnia")["Pop_base"].sum()
     append_block("Etnia", pop_eth)
 
     # ---------------------------------------------------
-    # 4) Vendbanimi
+    # 6) Vendbanimi
     # ---------------------------------------------------
     pop_vb = df_pop.groupby("Vendbanimi")["Pop_base"].sum()
     append_block("Vendbanimi", pop_vb)
 
     # ---------------------------------------------------
-    # 5) Gjinia
+    # 7) Gjinia (për fletën e pop_age)
     # ---------------------------------------------------
     pop_gender = df_age.groupby("Gjinia")["Pop_age"].sum()
     append_block("Gjinia", pop_gender)
 
     # ---------------------------------------------------
-    # 6) Grupmoshat (dynamic bins)
+    # 8) Grupmoshat dinamike
     # ---------------------------------------------------
     merged_bins, labels = create_dynamic_age_groups(min_age, max_age, data_collection_method)
 
-    # -----------------------------
-    # 6) Grupmoshat me etiketa të pastra (18-24, 25-34, 65+)
-    # -----------------------------
-
-    merged_bins, labels = create_dynamic_age_groups(min_age, max_age, data_collection_method)
-
     long_age = []
-
     for _, row in df_age.iterrows():
         for col in age_mask_cols:
             age = int(col)
             pop = row[col]
 
-            # Gjej bin për këtë moshë
-            for idx, (lo, hi) in enumerate(merged_bins):
+            for lo, hi in merged_bins:
                 if lo <= age <= hi:
-                    # Përgatisim formatimin e etiketës
-                    if hi >= 85 and data_collection_method!="CAWI":
+                    if hi >= 85 and data_collection_method != "CAWI":
                         label = f"{lo}+"
-                    elif hi >= 65 and data_collection_method=="CAWI":
+                    elif hi >= 65 and data_collection_method == "CAWI":
                         label = f"{lo}+"
                     else:
                         label = f"{lo}-{hi}"
@@ -1746,15 +1752,12 @@ def compute_population_coefficients(
         df_age_long = pd.DataFrame(long_age, columns=["Age_group", "Count"])
         pop_age_grp = df_age_long.groupby("Age_group")["Count"].sum()
 
-        # Ruaj rendin sipas moshës (p.sh. 18-24 → 25-34 → ... → 65+)
+        # Order groups correctly
         ordered = sorted(pop_age_grp.index, key=lambda s: int(s.split("-")[0].replace("+","")))
         pop_age_grp = pop_age_grp[ordered]
 
         append_block("Grupmosha", pop_age_grp)
 
-
-    # ---------------------------------------------------
-    # Return final result
     # ---------------------------------------------------
     return pd.DataFrame(out)
 
@@ -2677,27 +2680,25 @@ if run_button:
     ###########################################
     # FIX MAJORITY ETHNICITY CALCULATION HERE
     ###########################################
-
-    eth_majority = {}
-
     if "Etnia" in sub_options:
-        if len(sub_options) == 2:
-            for kom in pivot.index:
-                a = pivot.at[kom, "Shqiptar - Urban"] + pivot.at[kom, "Shqiptar - Rural"]
-                s = pivot.at[kom, "Serb - Urban"] + pivot.at[kom, "Serb - Rural"]
-                t = pivot.at[kom, "Tjerë - Urban"] + pivot.at[kom, "Tjerë - Rural"]
+        eth_majority = {}
 
-                totals = {"Shqiptar": a, "Serb": s, "Tjerë": t}
+        for kom in pivot.index:
+            totals = {}
+            
+            # Find all ethnicity groups dynamically
+            for eth in ["Shqiptar", "Serb", "Tjerë"]:
+                cols = [c for c in pivot.columns if c.startswith(eth)]
+                total = sum(pivot.at[kom, c] for c in cols)
+                totals[eth] = total
+
+            # If all totals are 0 → no majority
+            if all(v == 0 for v in totals.values()):
+                eth_majority[kom] = None
+            else:
                 eth_majority[kom] = max(totals, key=totals.get)
 
-            majority = eth_majority
-        
-        else:
-            for kom in pivot.index:
-                totals = {"Shqiptar": pivot.at[kom, "Shqiptar"], "Serb": pivot.at[kom, "Serb"], "Tjerë": pivot.at[kom, "Tjerë"]}
-                eth_majority[kom] = max(totals, key=totals.get)
-
-            majority = eth_majority
+        majority = eth_majority
 
     else:
         majority = {}
@@ -2745,28 +2746,6 @@ if run_button:
 
             if os_label in pivot.columns:
                 pivot[non_label] = pivot["Total"] - pivot[os_label]
-
-        # VENDNDARJA (Urban/Rural)
-        elif var == "Vendbanimi":
-            other = "Urban" if os_value == "Rural" else "Rural"
-            if os_value in pivot.columns:
-                pivot[other] = pivot["Total"] - pivot[os_value]
-
-        # ETNIA
-        elif var == "Etnia":
-            # Oversample one ethnicity: all others combined = Total - oversampled
-            all_eth_cols = ["Shqiptar - Urban","Shqiptar - Rural",
-                            "Serb - Urban","Serb - Rural",
-                            "Tjerë - Urban","Tjerë - Rural"]
-
-            # Sum the columns for the oversampled ethnicity
-            eth_cols = [c for c in all_eth_cols if c.startswith(os_value)]
-            other_cols = [c for c in all_eth_cols if c not in eth_cols]
-
-            # Only do it if oversampled ethnicity exists
-            if eth_cols:
-                oversampled_sum = pivot[eth_cols].sum(axis=1)
-                pivot["Other_Eth"] = pivot["Total"] - oversampled_sum
 
         # KOMUNA / REGJION — no need to fix, because these do NOT create new columns
         
