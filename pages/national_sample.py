@@ -2628,7 +2628,8 @@ if run_button:
         if len(entries) != 1:
             continue
 
-        os_value = entries[0]["value"]
+        if var != "Mosha":
+            os_value = entries[0]["value"]
 
         # GJINIA
         if var == "Gjinia":
