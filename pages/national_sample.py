@@ -2617,6 +2617,59 @@ if run_button:
             min_total=3,   # minimum anketa per komunë
             min_eth=3      # minimum per vendbanim (Urban/Rural)
             )
+    
+    # ==========================================================
+    # RECALCULATE NON-OVERSAMPLED CATEGORIES AFTER FIX ALLOCATION
+    # ==========================================================
+
+    for var, entries in oversample_inputs.items():
+
+        # Skip variables with multiple oversampled categories (Komuna/Etnia)
+        if len(entries) != 1:
+            continue
+
+        os_value = entries[0]["value"]
+
+        # GJINIA
+        if var == "Gjinia":
+            # Which category is NOT oversampled?
+            other_gender = "Femra" if os_value == "Meshkuj" else "Meshkuj"
+
+            # Get the oversample column (created earlier)
+            if os_value in pivot.columns:
+                pivot[other_gender] = pivot["Total"] - pivot[os_value]
+
+        # MOSHA
+        elif var == "Mosha":
+            os_label = f"{entries[0]['min_age']}–{entries[0]['max_age']}"
+            non_label = f"{entries[0]['max_age']+1}+"
+
+            if os_label in pivot.columns:
+                pivot[non_label] = pivot["Total"] - pivot[os_label]
+
+        # VENDNDARJA (Urban/Rural)
+        elif var == "Vendbanimi":
+            other = "Urban" if os_value == "Rural" else "Rural"
+            if os_value in pivot.columns:
+                pivot[other] = pivot["Total"] - pivot[os_value]
+
+        # ETNIA
+        elif var == "Etnia":
+            # Oversample one ethnicity: all others combined = Total - oversampled
+            all_eth_cols = ["Shqiptar - Urban","Shqiptar - Rural",
+                            "Serb - Urban","Serb - Rural",
+                            "Tjerë - Urban","Tjerë - Rural"]
+
+            # Sum the columns for the oversampled ethnicity
+            eth_cols = [c for c in all_eth_cols if c.startswith(os_value)]
+            other_cols = [c for c in all_eth_cols if c not in eth_cols]
+
+            # Only do it if oversampled ethnicity exists
+            if eth_cols:
+                oversampled_sum = pivot[eth_cols].sum(axis=1)
+                pivot["Other_Eth"] = pivot["Total"] - oversampled_sum
+
+        # KOMUNA / REGJION — no need to fix, because these do NOT create new columns
         
     if not sub_options:
         pivot = pivot.drop(columns=["Urban"])
