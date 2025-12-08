@@ -2597,16 +2597,23 @@ if run_button:
 
     eth_majority = {}
 
-    for kom in pivot.index:
-        a = pivot.at[kom, "Shqiptar - Urban"] + pivot.at[kom, "Shqiptar - Rural"]
-        s = pivot.at[kom, "Serb - Urban"] + pivot.at[kom, "Serb - Rural"]
-        t = pivot.at[kom, "Tjerë - Urban"] + pivot.at[kom, "Tjerë - Rural"]
+    if "Etnia" in sub_options:
+        for kom in pivot.index:
+            a = pivot.at[kom, "Shqiptar - Urban"] + pivot.at[kom, "Shqiptar - Rural"]
+            s = pivot.at[kom, "Serb - Urban"] + pivot.at[kom, "Serb - Rural"]
+            t = pivot.at[kom, "Tjerë - Urban"] + pivot.at[kom, "Tjerë - Rural"]
 
-        totals = {"Shqiptar": a, "Serb": s, "Tjerë": t}
-        eth_majority[kom] = max(totals, key=totals.get)
+            totals = {"Shqiptar": a, "Serb": s, "Tjerë": t}
+            eth_majority[kom] = max(totals, key=totals.get)
 
-    majority = eth_majority
-    ###########################################
+        majority = eth_majority
+
+    else:
+        majority = {}
+
+        ###########################################
+        # FIX MAJORITY ETHNICITY CALCULATION HERE
+        ###########################################
 
     pivot = fix_minimum_allocations(
             pivot=pivot,
