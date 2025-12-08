@@ -374,8 +374,10 @@ def compute_gender_age_coefficients(df_ga: pd.DataFrame,
     # Selected ages
     selected_age_cols = [
         c for c in age_cols_sorted
-        if min_age <= int(str(c)) <= max_age
+        if min_age <= int(c) <= max_age
     ]
+
+    print(selected_age_cols)
 
     if not selected_age_cols:
         # No matching age columns: coefficient 0 for all
@@ -1613,6 +1615,7 @@ def compute_population_coefficients(
     df_ga_f = df_ga[df_ga["Komuna"].isin(komuna_filter)].copy()
     df_ga_f = df_ga_f[df_ga_f["Gjinia"].isin(gender_selected)]
 
+    print(df_ga_f)
     if df_ga_f.empty:
         return pd.DataFrame()
 
@@ -1628,9 +1631,9 @@ def compute_population_coefficients(
 
     # Nëse nuk ka max_age → max_age = 120
     if max_age is None:
-        max_age = 120
+        max_age = 200
 
-    selected_age_cols = [str(a) for a in age_columns if min_age <= a <= max_age]
+    selected_age_cols = [a for a in age_columns if min_age <= a <= max_age]
 
     # -------------------------------------------------------------
     # 2) Derived population per Komuna = Σ(mosha min_age→max_age)
