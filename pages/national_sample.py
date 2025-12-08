@@ -566,28 +566,31 @@ def fix_minimum_allocations(
     df_eth: pd.DataFrame,
     region_map: dict,
     strata_col: list,
-    majority : dict,
+    majority: dict,
     min_total: int = 3,
     min_eth: int = 3,      # threshold for removing (total eth < 3)
-    min_vb: int = 2     # not used for ethnicity removal now, only for settlement logic
+    min_vb: int = 2        # not used for ethnicity removal now, only for settlement logic
 ) -> pd.DataFrame:
 
     pivot_fixed = pivot.copy()
-    municipalities = list(pivot_fixed.index)
+    # Përdor vetëm komunat reale, jo rreshtin "Total"
+    municipalities = [m for m in pivot_fixed.index if m != "Total"]
 
     # store initial totals for receiver limit
     initial_total = pivot_fixed["Total"].copy()
 
     has_ethnicity = any(
-    c.startswith(("Shqiptar", "Serb", "Tjerë"))
-    for c in pivot_fixed.columns)
+        c.startswith(("Shqiptar", "Serb", "Tjerë"))
+        for c in pivot_fixed.columns
+    )
 
+    # ======================================================
+    # CASE 0 – Nuk ka fare kolona etnie -> vetëm fix TOTAL
+    # ======================================================
     if not has_ethnicity:
 
-        # ---------------
         # Pjesa 1: gjej komunat me mungesë
-        # ---------------
-        deficits = {}  # {komuna: sa i mungon për me arrit 3}
+        deficits = {}  # {komuna: sa i mungon për me arrit min_total}
         for kom in municipalities:
             current = pivot_fixed.at[kom, "Total"]
             if current < min_total:
@@ -598,16 +601,14 @@ def fix_minimum_allocations(
             pivot_fixed.loc["Total"] = pivot_fixed.sum(numeric_only=True)
             return pivot_fixed
 
-        # ---------------
         # Pjesa 2: rialokim nga komuna të rajonit
-        # ---------------
         for kom, missing in deficits.items():
             reg = region_map.get(kom, None)
 
             # Gjej kandidatë brenda rajonit
             same_region = [
-                k for k in municipalities 
-                if k != kom and region_map.get(k,None) == reg
+                k for k in municipalities
+                if k != kom and region_map.get(k, None) == reg
             ]
 
             # fallback në gjithë vendin nëse rajoni është bosh
@@ -628,16 +629,72 @@ def fix_minimum_allocations(
                     pivot_fixed.at[kom, "Total"] += 1
                     to_allocate -= 1
 
-        # ---------------
         # Pjesa 3: Ribëj totalin e fundit
-        # ---------------
+
+        pivot_fixed["Total"] = pivot_fixed[strata_col].sum(axis=1)
         pivot_fixed.loc["Total"] = pivot_fixed.sum(numeric_only=True)
 
         return pivot_fixed
 
+    ##############################################################
+    # Detect ethnicity structure automatically
+    ##############################################################
 
-    # identify ethnicity columns (Shqiptar, Serb, Tjeter)
-    eth_cols = [c for c in pivot_fixed.columns if any(x in c for x in ["Shqiptar", "Serb", "Tjerë"])]
+    # These are the possible ethnicity forms
+    eth_basic = ["Shqiptar", "Serb", "Tjerë"]
+    eth_urban = [f"{e} - Urban" for e in eth_basic]
+    eth_rural = [f"{e} - Rural" for e in eth_basic]
+
+    available_cols = set(pivot_fixed.columns)
+
+    # Case A – full ethnicity × settlement exists (Shqiptar - Urban, Serb - Rural, ...)
+    if all(col in available_cols for col in eth_urban + eth_rural):
+        eth_structure = "eth_settlement"
+        eth_groups = {
+            "Shqiptar": ["Shqiptar - Urban", "Shqiptar - Rural"],
+            "Serb":     ["Serb - Urban", "Serb - Rural"],
+            "Tjerë":    ["Tjerë - Urban", "Tjerë - Rural"]
+        }
+
+    # Case B – only ethnicity, no settlement (Shqiptar, Serb, Tjerë)
+    elif all(e in available_cols for e in eth_basic):
+        eth_structure = "eth_only"
+        eth_groups = {
+            "Shqiptar": ["Shqiptar"],
+            "Serb":     ["Serb"],
+            "Tjerë":    ["Tjerë"]
+        }
+
+    # Case C – no usable ethnicity structure → skip ethnicity logic entirely
+    else:
+        eth_structure = "none"
+        eth_groups = {}
+
+    # ------------------------------------------------------
+    # If there is no usable ethnicity structure, exit early
+    # ------------------------------------------------------
+    if eth_structure == "none":
+        # Only ensure minimum TOTAL per municipality
+        for kom in municipalities:
+            deficit = min_total - pivot_fixed.at[kom, "Total"]
+            if deficit > 0:
+                # find donors in same region
+                region = region_map.get(kom, None)
+                donors = [d for d in municipalities if d != kom and region_map.get(d, None) == region]
+
+                if not donors:
+                    donors = [d for d in municipalities if d != kom]
+
+                for d in donors:
+                    if deficit == 0:
+                        break
+                    if pivot_fixed.at[d, "Total"] > min_total:
+                        pivot_fixed.at[d, "Total"] -= 1
+                        pivot_fixed.at[kom, "Total"] += 1
+                        deficit -= 1
+
+        pivot_fixed.loc["Total"] = pivot_fixed.sum(numeric_only=True)
+        return pivot_fixed
 
     # allowed matrix (columns that existed initially)
     allowed = (pivot > 0)
@@ -646,7 +703,7 @@ def fix_minimum_allocations(
     def receiver_candidates(eth, col, donor_kom):
 
         receivers = []
-        break_reasons = {}   # store reasons why each r was blocked
+        break_reasons = {}   # store reasons why each r was blocked (nëse të duhet për debug)
 
         for r in pivot_fixed.index:
 
@@ -657,11 +714,15 @@ def fix_minimum_allocations(
 
             # RULE 1: majority restriction
             if eth in ["Serb", "Shqiptar"]:
-                if majority[r] != eth:
-                    break_reasons[r] = f"blocked: majority[{r}] = {majority[r]}, required = {eth}"
+                if majority.get(r) != eth:
+                    break_reasons[r] = f"blocked: majority[{r}] = {majority.get(r)}, required = {eth}"
                     continue
 
             # RULE 2: allowed matrix (ethnicity–settlement allowed or not)
+            if col not in allowed.columns:
+                break_reasons[r] = f"blocked: column {col} not in allowed"
+                continue
+
             if not allowed.at[r, col]:
                 break_reasons[r] = f"blocked: allowed[{r},{col}] = False"
                 continue
@@ -674,48 +735,38 @@ def fix_minimum_allocations(
                 )
                 continue
 
-            # RULE 4: (optional) region preference handled later
             receivers.append(r)
 
-        # Print all rejections with reasons
-        for m in pivot_fixed.index:
-            if m == donor_kom:
-                continue
-
         # Apply regional priority
-        region_of = {m: region_map[m] for m in pivot_fixed.index}
-        donor_region = region_of[donor_kom]
+        region_of = {m: region_map.get(m, None) for m in pivot_fixed.index}
+        donor_region = region_of.get(donor_kom, None)
 
-        in_region = [rcv for rcv in receivers if region_of[rcv] == donor_region]
+        if donor_region is not None:
+            in_region = [rcv for rcv in receivers if region_of.get(rcv, None) == donor_region]
+        else:
+            in_region = []
 
         if in_region:
             return in_region
-        
+
         return receivers
 
     # -----------------------------------------------------
     # ETHNIC REALLOCATION (core logic)
     # -----------------------------------------------------
-    # We keep Urban/Rural separately, but remove all
-    # units for an ethnicity if total < 3
+    # We keep Urban/Rural separately where applicable, but remove all
+    # units for an ethnicity in a municipality if total < min_eth
     # -----------------------------------------------------
-    ethnic_groups = {
-        "Shqiptar": [c for c in eth_cols if c.startswith("Shqiptar")],
-        "Serb":     [c for c in eth_cols if c.startswith("Serb")],
-        "Tjerë":   [c for c in eth_cols if c.startswith("Tjerë")]
-    }
 
     for kom in municipalities:
-        if kom == "Total":
-            continue
 
-        for eth, cols in ethnic_groups.items():
+        for eth, cols in eth_groups.items():
 
-            # total across Urban/Rural
-            total_eth = sum(pivot_fixed.at[kom, c] for c in cols)
+            # total across all columns for this ethnicity (Urban/Rural or single)
+            total_eth = sum(pivot_fixed.at[kom, c] for c in cols if c in pivot_fixed.columns)
 
-            # OK if >= 3
-            if total_eth >= 3:
+            # OK if >= min_eth
+            if total_eth >= min_eth:
                 continue
 
             # nothing to remove if 0
@@ -723,10 +774,13 @@ def fix_minimum_allocations(
                 continue
 
             # number of units to remove = all units
-            units_to_move = total_eth
+            units_to_move = total_eth  # (përdoret konceptualisht, nuk është i domosdoshëm në while)
 
-            # move Urban first then Rural (or reverse)
+            # move across columns (p.sh. fillimisht Urban pastaj Rural)
             for col in cols:
+                if col not in pivot_fixed.columns:
+                    continue
+
                 while pivot_fixed.at[kom, col] > 0:
 
                     # find receivers
@@ -756,85 +810,114 @@ def fix_minimum_allocations(
                     pivot_fixed.at[kom, "Total"] -= 1
                     pivot_fixed.at[recv, "Total"] += 1
 
-    # ---------------------------------------------------------
-    # FINAL PASS: Fix ethnicity totals where combined total = 1
-    # ---------------------------------------------------------
+        # ---------------------------------------------------------
+        # FINAL PASS: Fix ethnicity totals where combined total = 1
+        # (bëhet si për eth_only ashtu edhe për eth_settlement)
+        # ---------------------------------------------------------
 
-    eth_groups = {
-        "Shqiptar": ["Shqiptar - Urban", "Shqiptar - Rural"],
-        "Serb":     ["Serb - Urban", "Serb - Rural"],
-        "Tjerë":    ["Tjerë - Urban", "Tjerë - Rural"]
-    }
+        eth_groups_final = eth_groups  # përdor grupet e detektuara nga eth_structure
 
-    for kom in pivot_fixed.index:
+        for kom in municipalities:
 
-        for eth, cols in eth_groups.items():
-            # Combined total of this ethnicity in this municipality
-            total_eth = sum(pivot_fixed.at[kom, c] for c in cols)
+            for eth, cols in eth_groups_final.items():
 
-            if total_eth != 1:
-                continue   # only fix exactly 1-case
+                # Combined total of this ethnicity in this municipality
+                total_eth = sum(
+                    pivot_fixed.at[kom, c]
+                    for c in cols
+                    if c in pivot_fixed.columns
+                )
 
-            # Find a valid donor satisfying SAME RULES already used
-            donors = []
-            for d in pivot_fixed.index:
-                if d == kom:
+                # Only fix the EXACT 1-case
+                if total_eth != 1:
                     continue
 
-                # Majority rule (if applicable)
-                if eth in ["Serb", "Shqiptar"]:
-                    if majority[d] != eth:
+                # -------------------------------------------------
+                # 1) Gjej donor të vlefshëm
+                # -------------------------------------------------
+                donors = []
+                for d in municipalities:
+                    if d == kom:
                         continue
 
-                # Donor must have at least min_eth
-                donor_eth_total = sum(pivot_fixed.at[d, c] for c in cols)
-                if donor_eth_total <= min_eth:
+                    # RULE: Majority restriction (vetëm kur zbatohet)
+                    if eth in ["Serb", "Shqiptar"] and majority.get(d) != eth:
+                        continue
+
+                    donor_eth_total = sum(
+                        pivot_fixed.at[d, c]
+                        for c in cols
+                        if c in pivot_fixed.columns
+                    )
+                    if donor_eth_total <= min_eth:
+                        continue
+
+                    # Donor duhet të ketë njësi për dhënë
+                    if all(
+                        pivot_fixed.at[d, c] <= 0
+                        for c in cols
+                        if c in pivot_fixed.columns
+                    ):
+                        continue
+
+                    # Donor total nuk mund të bjerë nën min_total
+                    if pivot_fixed.at[d, "Total"] <= min_total:
+                        continue
+
+                    donors.append(d)
+
+                if not donors:
                     continue
 
-                # Donor total cannot go below min_total
-                if pivot_fixed.at[d, "Total"] <= min_total:
+                # Prefer same region donor
+                region_kom = region_map.get(kom)
+                donors_in_region = [
+                    d for d in donors
+                    if region_map.get(d) == region_kom
+                ]
+
+                donor = donors_in_region[0] if donors_in_region else donors[0]
+
+                # -------------------------------------------------
+                # 2) Zgjedh kolonën ku ta shtoj (një nga cols)
+                # -------------------------------------------------
+                # Prioritet sipas allowed matrix, nëse ekziston
+                target_col = None
+                for c in cols:
+                    if c in allowed.columns and allowed.at[kom, c]:
+                        target_col = c
+                        break
+
+                if target_col is None:
+                    # fallback: merr kolonën e parë ekzistuese
+                    for c in cols:
+                        if c in pivot_fixed.columns:
+                            target_col = c
+                            break
+
+                if target_col is None:
                     continue
 
-                # Donor must have at least 1 in SOME Serb column
-                if all(pivot_fixed.at[d, c] <= 0 for c in cols):
+                # -------------------------------------------------
+                # 3) Zgjedh kolonën nga ku do të heqim te donori
+                # -------------------------------------------------
+                donor_col = None
+                for c in cols:
+                    if c in pivot_fixed.columns and pivot_fixed.at[donor, c] > 0:
+                        donor_col = c
+                        break
+
+                if donor_col is None:
                     continue
 
-                donors.append(d)
+                # -------------------------------------------------
+                # 4) Transferimi i njësisë
+                # -------------------------------------------------
+                pivot_fixed.at[kom, target_col] += 1
+                pivot_fixed.at[donor, donor_col] -= 1
 
-            if not donors:
-                continue
-
-            # Prefer same region donor
-            region_kom = region_map[kom]
-            donors_in_region = [d for d in donors if region_map[d] == region_kom]
-            donor = donors_in_region[0] if donors_in_region else donors[0]
-
-            # Decide which column to increase (Urban or Rural)
-            # Prefer to add to the larger underlying population if allowed
-            target_col = None
-            for c in cols:
-                if allowed.at[kom, c]:   # allowed matrix check
-                    target_col = c
-                    break
-
-            if target_col is None:
-                continue
-
-            # Decide which column to subtract from donor
-            donor_col = None
-            for c in cols:
-                if pivot_fixed.at[donor, c] > 0:
-                    donor_col = c
-                    break
-
-            if donor_col is None:
-                continue
-
-            # Transfer 1 unit
-            pivot_fixed.at[kom, target_col] += 1
-            pivot_fixed.at[donor, donor_col]  -= 1
-            pivot_fixed.at[kom, "Total"] += 1
-            pivot_fixed.at[donor, "Total"] -= 1
+                pivot_fixed.at[kom, "Total"] += 1
+                pivot_fixed.at[donor, "Total"] -= 1
 
     # -----------------------------------------------------
     # RECOMPUTE TOTALS
