@@ -1016,6 +1016,7 @@ def select_psus_for_municipality(
         return pd.DataFrame()
 
     num_psu, leftover, extra_psu_size = compute_num_psu(total_interviews, k)
+
     if num_psu == 0:
         return pd.DataFrame()
 
@@ -1170,9 +1171,34 @@ def select_psus_for_municipality(
     else:
         # p.sh. 42 anketa, k=8 → 5 PSU (5*8) + leftover=2 → shpërndajmë 2
         base_sizes = [k] * num_psu
+
         if leftover > 0:
-            for i in range(min(leftover, len(base_sizes))):
-                base_sizes[i] += 1
+            N = len(base_sizes)
+
+            # ------------------------------
+            # RULE A: leftover <= N
+            # ------------------------------
+            if leftover <= N:
+                for i in range(leftover):
+                    base_sizes[i] += 1
+
+            else:
+                # ------------------------------
+                # RULE B: leftover > N
+                # ------------------------------
+
+                # STEP 1: give 1 interview to each PSU
+                for i in range(N):
+                    base_sizes[i] += 1
+
+                L = leftover - N  # remaining interviews
+
+                # STEP 2: distribute remaining leftover round-robin
+                idx = 0
+                while L > 0:
+                    base_sizes[idx] += 1
+                    L -= 1
+                    idx = (idx + 1) % N
 
     selected["Intervista"] = base_sizes[: len(selected)]
 
@@ -1236,6 +1262,7 @@ def compute_psu_table_for_all_municipalities(
         rural_int = total_interviews - urban_int
 
         df_mun = df_psu[df_psu["Komuna"] == kom].copy()
+
         if df_mun.empty:
             continue
 
@@ -1246,10 +1273,7 @@ def compute_psu_table_for_all_municipalities(
         # ===========================
         # 1) URBAN PSU (një rresht)
         # ===========================
-        # ===========================
-        # 1) URBAN PSU (always single)
-        # ===========================
-        if urban_int > 0:
+        if urban_int >= 0:
             df_mun_urban = df_mun[df_mun["Vendbanimi"] == "Urban"]
 
             if not df_mun_urban.empty:
@@ -1282,7 +1306,7 @@ def compute_psu_table_for_all_municipalities(
 
 
         # ===========================
-        # 2) RURAL PSU (përdor logjikën e tanishme)
+        # 2) RURAL PSU
         # ===========================
 
         # Gjej cilat etni kanë mostra > 0 në këtë komunë
@@ -1306,8 +1330,41 @@ def compute_psu_table_for_all_municipalities(
                 required_ethnicities=required_eth
             )
 
-            if not psu_rural.empty:
+            # FALLBACK: if selection fails (empty), allocate all interviews to largest Rural PSU
+            if psu_rural.empty:
+
+                # Compute PopFilt for rural PSU rows BEFORE sorting
+                df_mun_rural = df_mun_rural.copy()
+                df_mun_rural["PopFilt"] = df_mun_rural.apply(
+                    lambda r: compute_filtered_pop_for_psu_row(
+                        r,
+                        age_min=min_age,
+                        age_max=max_age,
+                        gender_selected=gender_selected,
+                        eth_filter=eth_filter
+                    ),
+                    axis=1
+                )
+
+                # If still empty (no valid PopFilt), return at least one PSU
+                if df_mun_rural["PopFilt"].sum() == 0:
+                    # fallback: pick first rural PSU
+                    fallback_row = df_mun_rural.head(1)
+                    fallback_row = fallback_row.assign(Intervista=rural_int)[
+                        ["Komuna", "Fshati/Qyteti", "Vendbanimi", "Intervista"]
+                    ]
+                    all_rows.append(fallback_row)
+                else:
+                    # sort by PopFilt
+                    fallback = df_mun_rural.sort_values("PopFilt", ascending=False).head(1)
+                    fallback = fallback.assign(Intervista=rural_int)[
+                        ["Komuna", "Fshati/Qyteti", "Vendbanimi", "Intervista"]
+                    ]
+                    all_rows.append(fallback)
+
+            else:
                 all_rows.append(psu_rural)
+
 
     # ===========================
     # 3) Bashkimi final
@@ -3027,7 +3084,7 @@ if run_button:
                     index=df_mun_pop.index
                 )
                 pivot_for_psu.loc["Total"] = pivot_for_psu.sum()
-
+            
         with st.spinner("Duke llogaritur PSU-të..."):
             if "pivot_for_psu" in locals():
                 psu_table = compute_psu_table_for_all_municipalities(
