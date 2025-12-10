@@ -1083,22 +1083,26 @@ def select_psus_for_municipality(
             remaining = df.drop(index=selected_idx)
             extra = remaining.head(remaining_needed).index.tolist()
             selected_idx.extend(extra)
+
     else:
-        # b) nuk kemi mjaftueshëm PSU për të gjithë quadrant-et → greedy
-        used_quads = set()
-        for i, row in df.iterrows():
-            q = row["Quadrant"]
-            if q not in used_quads:
-                selected_idx.append(i)
-                used_quads.add(q)
-                if len(selected_idx) == num_psu:
-                    break
+        # b) pak PSU → zgjedhim si fillim PSU-në më të madhe brenda çdo quadrant-i
+        top_per_quad = (
+            df.sort_values("PopFilt", ascending=False)
+            .groupby("Quadrant", group_keys=False)
+            .head(1)
+        )
+
+        # tani rendisim këto top-PSU sipas popullsisë, dhe marrim vetëm aq sa na duhen
+        top_per_quad = top_per_quad.sort_values("PopFilt", ascending=False)
+
+        selected_idx = top_per_quad.head(num_psu).index.tolist()
         # nëse akoma s'e kemi arritur numrin, plotëso me më të mëdhenjtë
         if len(selected_idx) < num_psu:
             remaining = df.drop(index=selected_idx)
             extra = remaining.head(num_psu - len(selected_idx)).index.tolist()
             selected_idx.extend(extra)
 
+            
     selected_idx = list(dict.fromkeys(selected_idx))  # heq duplikate duke ruajtur rendin
     selected = df.loc[selected_idx].copy()
 
