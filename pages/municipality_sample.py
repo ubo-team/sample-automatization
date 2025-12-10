@@ -1237,6 +1237,10 @@ if run:
     )
 
     st.pydeck_chart(deck)
+    deck_html = deck.to_html(as_string=True)
+    html_bytes = deck_html.encode("utf-8")
+    # Butoni i shkarkimit
+    create_download_link(html_bytes, "psu_map.html", "Shkarko hartën (HTML)")
     
     coef_df = compute_population_coefficients(
     df_ga=df_ga,
