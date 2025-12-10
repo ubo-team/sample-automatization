@@ -12,6 +12,7 @@ from docx.shared import Pt
 from docx.enum.text import WD_BREAK
 import re
 from docx.enum.text import WD_ALIGN_PARAGRAPH
+from urllib.parse import urlencode
 
 st.markdown("""
     <div style='width: 100%; padding: 20px 30px; background: #ffffff;
@@ -1096,6 +1097,7 @@ def select_psus_for_municipality(
         top_per_quad = top_per_quad.sort_values("PopFilt", ascending=False)
 
         selected_idx = top_per_quad.head(num_psu).index.tolist()
+
         # nëse akoma s'e kemi arritur numrin, plotëso me më të mëdhenjtë
         if len(selected_idx) < num_psu:
             remaining = df.drop(index=selected_idx)
@@ -2146,6 +2148,10 @@ def translate(term: str) -> str:
     # 2. Fallback: return original
     return term
 
+def generate_map_url(lat, lon, zoom):
+    params = urlencode({"lat": lat, "lon": lon, "zoom": zoom})
+    return f"https://your-streamlit-app-url.com/?{params}"
+
 # Load data
 try:
     df_eth = load_ethnicity_settlement_data("excel-files/ASK-2024-Komuna-Etnia-Vendbanimi.xlsx")
@@ -3043,7 +3049,7 @@ if run_button:
             st.dataframe(psu_table, use_container_width=True)
 
             psu_excel = df_to_excel_bytes(psu_table, sheet_name="PSU")
-            create_download_link2(
+            create_download_link(
                 file_bytes=psu_excel,
                 filename="psu_capi_tegjitha_komunat.xlsx",
                 label="Shkarko PSU-të"
@@ -3091,6 +3097,10 @@ if run_button:
             )
 
             st.pydeck_chart(deck)
+            deck_html = deck.to_html(as_string=True)
+            html_bytes = deck_html.encode("utf-8")
+            # Butoni i shkarkimit
+            create_download_link(html_bytes, "psu_map.html", "Shkarko hartën (HTML)")
 
     # COMMON SECTION (always included)
     if not oversample_enabled:
