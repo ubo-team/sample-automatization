@@ -377,8 +377,6 @@ def compute_gender_age_coefficients(df_ga: pd.DataFrame,
         if min_age <= int(c) <= max_age
     ]
 
-    print(selected_age_cols)
-
     if not selected_age_cols:
         # No matching age columns: coefficient 0 for all
         return pd.Series(
@@ -569,6 +567,7 @@ def fix_minimum_allocations(
     region_map: dict,
     strata_col: list,
     majority: dict,
+    selected_ethnicity: list,
     min_total: int = 3,
     min_eth: int = 3,      # threshold for removing (total eth < 3)
     min_vb: int = 2        # not used for ethnicity removal now, only for settlement logic
@@ -586,57 +585,87 @@ def fix_minimum_allocations(
         for c in pivot_fixed.columns
     )
 
-    # ======================================================
-    # CASE 0 – Nuk ka fare kolona etnie -> vetëm fix TOTAL
-    # ======================================================
-    if not has_ethnicity:
+    if not has_ethnicity:                        
+        # ======================================================
+        # 0B: Llogarit majority ethnicity për TË GJITHA komunat
+        # ======================================================
+        majority_all = {}
 
-        # Pjesa 1: gjej komunat me mungesë
-        deficits = {}  # {komuna: sa i mungon për me arrit min_total}
         for kom in municipalities:
-            current = pivot_fixed.at[kom, "Total"]
-            if current < min_total:
-                deficits[kom] = min_total - current
+            dfk = df_eth[df_eth["Komuna"] == kom]
+            dfk = dfk[dfk["Etnia"] != "Total"]
 
-        # Nëse s'ka komuna me deficite → kthe ashtu si është
-        if not deficits:
-            pivot_fixed.loc["Total"] = pivot_fixed.sum(numeric_only=True)
-            return pivot_fixed
+            if dfk.empty:
+                majority_all[kom] = None
+                continue
 
-        # Pjesa 2: rialokim nga komuna të rajonit
-        for kom, missing in deficits.items():
+            pop_by_eth = dfk.groupby("Etnia")["Pop_base"].sum()
+
+            if pop_by_eth.sum() == 0:
+                majority_all[kom] = None
+            else:
+                majority_all[kom] = pop_by_eth.idxmax()
+
+        # ======================================================
+        # 0C: Gjej komunat me Total = 1
+        # ======================================================
+        mun_total_1 = [
+            kom for kom in municipalities
+            if int(pivot_fixed.at[kom, "Total"]) == 1
+        ]
+
+        # ======================================================
+        # 0D: RIALOKO KOMUNAT KU majority ≠ selected_ethnicity
+        # ======================================================
+        for kom in mun_total_1:
+            maj = majority_all.get(kom)
+
+            # Përndryshe → duhet ta largojmë 1 intervistë
             reg = region_map.get(kom, None)
 
-            # Gjej kandidatë brenda rajonit
-            same_region = [
-                k for k in municipalities
-                if k != kom and region_map.get(k, None) == reg
+            # Donatorët brenda rajonit
+            donors = [
+            d for d in municipalities
+            if d != kom
+            and str(majority_all.get(d)).strip().lower() == str(selected_ethnicity[0]).strip().lower()
+            and region_map.get(d, None) == reg
+            and pivot_fixed.at[d, "Total"] > min_total
             ]
 
-            # fallback në gjithë vendin nëse rajoni është bosh
-            if not same_region:
-                same_region = [k for k in municipalities if k != kom]
+            # Nëse s’ka në rajon → kombëtarisht
+            if not donors:
+                donors = [
+                    d for d in municipalities
+                    if d != kom
+                    and str(majority_all.get(d)).strip().lower() == str(selected_ethnicity[0]).strip().lower()
+                    and pivot_fixed.at[d, "Total"] > min_total
+                ]
 
-            to_allocate = missing
+            if not donors:
+                continue
 
-            # shko tek komunat e rajonit dhe mer 1 intervistë nga secila derisa të mbushësh deficitin
-            for donor in same_region:
-                if to_allocate == 0:
-                    break
+            donor = donors[0]
 
-                donor_total = pivot_fixed.at[donor, "Total"]
+            # REMOVE interview from KOM
+            sub_remove = pivot_fixed.loc[kom, ["Urban", "Rural"]].idxmax()
+            pivot_fixed.at[kom, sub_remove] -= 1
 
-                if donor_total > min_total:  # vetëm nëse ka më shumë se minimumi
-                    pivot_fixed.at[donor, "Total"] -= 1
-                    pivot_fixed.at[kom, "Total"] += 1
-                    to_allocate -= 1
+            # ADD interview to DONOR
+            sub_add = pivot_fixed.loc[donor, ["Urban", "Rural"]].idxmax()
+            pivot_fixed.at[donor, sub_add] += 1
 
-        # Pjesa 3: Ribëj totalin e fundit
+            # Recalculate totals consistently
+            pivot_fixed["Total"] = pivot_fixed["Urban"] + pivot_fixed["Rural"]
 
+        # ======================================================
+        # 0E: Final totals + remove rows with Total=0
+        # ======================================================
         pivot_fixed["Total"] = pivot_fixed[strata_col].sum(axis=1)
+        pivot_fixed = pivot_fixed[pivot_fixed["Total"] != 0]
         pivot_fixed.loc["Total"] = pivot_fixed.sum(numeric_only=True)
 
         return pivot_fixed
+        
 
     ##############################################################
     # Detect ethnicity structure automatically
@@ -1615,7 +1644,6 @@ def compute_population_coefficients(
     df_ga_f = df_ga[df_ga["Komuna"].isin(komuna_filter)].copy()
     df_ga_f = df_ga_f[df_ga_f["Gjinia"].isin(gender_selected)]
 
-    print(df_ga_f)
     if df_ga_f.empty:
         return pd.DataFrame()
 
@@ -2772,10 +2800,13 @@ if run_button:
             region_map=region_map,
             strata_col = original_strata_cols,
             majority=majority,
+            selected_ethnicity=eth_filter,
             min_total=3,   # minimum anketa per komunë
             min_eth=3      # minimum per vendbanim (Urban/Rural)
             )
     
+    pivot = pivot[pivot["Total"] != 0]
+
     # ==========================================================
     # RECALCULATE NON-OVERSAMPLED CATEGORIES AFTER FIX ALLOCATION
     # ==========================================================
