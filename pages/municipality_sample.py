@@ -693,76 +693,72 @@ def add_codes_to_coef_df(coef_df, data_collection_method):
 
 def create_dynamic_age_groups(age_min, age_max, data_collection_method):
     """
-    Krijon grupmosha dinamike kur përdoruesi ka vendosur max_age.
-    Nëse max_age është None → kthen grupmoshat standarde sipas metodës.
+    Fully corrected dynamic binning:
+    - Age groups start at age_min (e.g., 15)
+    - Clipped at age_max properly
+    - Merges bins <5 years automatically
+    - Supports CAWI vs CAPI/CATI differences
+    - Clean labels for SPSS and UI
     """
 
-    # -----------------------------------------
-    # CASE A — Nuk ka max_age → përdor standardet
-    # -----------------------------------------
-    if age_max is None:
-        if data_collection_method == "CAWI":
-            base = [(18,24), (25,34), (35,44), (45,54), (55,200)]
-        else:
-            base = [(18,24), (25,34), (35,44), (45,54), (55,64), (65,200)]
+    # -----------------------------
+    # 1. Default base bins
+    # -----------------------------
+    if data_collection_method == "CAWI":
+        base = [(18,24), (25,34), (35,44), (45,54), (55,200)]
+    else:
+        base = [(18,24), (25,34), (35,44), (45,54), (55,64), (65,200)]
 
+    # -----------------------------
+    # 2. If no max age → return standard bins
+    # -----------------------------
+    if age_max is None:
         labels = []
         for lo, hi in base:
-            if hi >= 200:
-                labels.append(f"{lo}+")
-            else:
-                labels.append(f"{lo}-{hi}")
-
+            labels.append(f"{lo}+" if hi >= 200 else f"{lo}-{hi}")
         return base, labels
 
-    # -----------------------------------------
-    # CASE B — Dynamic bins
-    # -----------------------------------------
-    base = [
-        (18,24),
-        (25,34),
-        (35,44),
-        (45,54),
-        (55,64),
-        (65,200)
-    ]
+    # -----------------------------
+    # 3. Adjust FIRST BIN to start at age_min
+    # -----------------------------
+    base_adj = []
+    first_lo, first_hi = base[0]
 
-    if data_collection_method == "CAWI":
-        base = [
-            (18,24),
-            (25,34),
-            (35,44),
-            (45,54),
-            (55,200)
-        ]
+    # e.g., (18,24) → (15,24)
+    base_adj.append((min(age_min, first_lo), first_hi))
 
-    hi_age = age_max
+    # rest unchanged
+    for lo, hi in base[1:]:
+        base_adj.append((lo, hi))
 
-    # 1) CLIP bins
+    # -----------------------------
+    # 4. Clip all bins to max_age
+    # -----------------------------
+    if age_max is None:
+        age_max = 200
+
     clipped = []
-    for lo, hi in base:
+    for lo, hi in base_adj:
         new_lo = max(lo, age_min)
-        new_hi = min(hi, hi_age)
+        new_hi = min(hi, age_max)
         if new_lo <= new_hi:
             clipped.append((new_lo, new_hi))
 
-    # 2) FIX small first bin
-    if len(clipped) >= 2:
-        lo, hi = clipped[0]
-        if (hi - lo + 1) < 5:
-            nlo, nhi = clipped[1]
-            clipped = [(lo, nhi)] + clipped[2:]
-
-    # 3) FIX small middle bins
+    # -----------------------------
+    # 5. Merge bins smaller than 5 years
+    # -----------------------------
     merged = []
     for lo, hi in clipped:
-        if merged and (hi - lo + 1) < 5:
+        if merged:
             plo, phi = merged[-1]
-            merged[-1] = (plo, hi)
+            if (hi - lo + 1) < 5:
+                merged[-1] = (plo, hi)
+            else:
+                merged.append((lo, hi))
         else:
             merged.append((lo, hi))
 
-    # 4) FIX last
+    # merge last if needed
     if len(merged) >= 2:
         lo, hi = merged[-1]
         if (hi - lo + 1) < 5:
@@ -770,7 +766,9 @@ def create_dynamic_age_groups(age_min, age_max, data_collection_method):
             merged[-2] = (plo, hi)
             merged = merged[:-1]
 
-    # 5) Labels
+    # -----------------------------
+    # 6. Clean labels
+    # -----------------------------
     labels = []
     for lo, hi in merged:
         if hi >= 200:
