@@ -2272,11 +2272,59 @@ st.sidebar.markdown("---")
 # Demographic filters
 st.sidebar.subheader("Filtrat demografikë")
 
-# Komuna filter
+# -----------------------------------------
+# Regjioni filter
+# -----------------------------------------
+regjioni_filter = st.sidebar.multiselect(
+    "Regjionet që përfshihen",
+    options=["Prishtinë", "Mitrovicë", "Gjilan", "Gjakovë",
+             "Ferizaj", "Prizren", "Pejë"],
+    default=["Prishtinë", "Mitrovicë", "Gjilan", "Gjakovë",
+             "Ferizaj", "Prizren", "Pejë"]
+)
+
+# -----------------------------------------
+# INIT session state
+# -----------------------------------------
+if "komuna_filter" not in st.session_state:
+    st.session_state["komuna_filter"] = sorted(df_eth["Komuna"].unique())
+
+if "last_regjioni_filter" not in st.session_state:
+    st.session_state["last_regjioni_filter"] = None
+
+# -----------------------------------------
+# APPLY REGION → KOMUNA FILTERING
+# -----------------------------------------
+if regjioni_filter:
+    allowed_komuna = sorted(
+        k for k, r in region_map.items()
+        if r in regjioni_filter
+    )
+else:
+    allowed_komuna = sorted(df_eth["Komuna"].unique())
+
+# -----------------------------------------
+# RESET vs FILTER logic (THIS IS THE FIX)
+# -----------------------------------------
+if st.session_state["last_regjioni_filter"] != regjioni_filter:
+    # Regjioni changed → RESET Komuna
+    st.session_state["komuna_filter"] = allowed_komuna.copy()
+    st.session_state["last_regjioni_filter"] = regjioni_filter.copy()
+
+else:
+    # Same Regjioni → only remove invalid Komuna
+    st.session_state["komuna_filter"] = [
+        k for k in st.session_state["komuna_filter"]
+        if k in allowed_komuna
+    ]
+
+# -----------------------------------------
+# Komuna widget (NO default!)
+# -----------------------------------------
 komuna_filter = st.sidebar.multiselect(
     "Komunat që përfshihen",
-    options=sorted(df_eth["Komuna"].unique()),
-    default=sorted(df_eth["Komuna"].unique())
+    options=allowed_komuna,
+    key="komuna_filter"
 )
 
 gender_selected = st.sidebar.multiselect(

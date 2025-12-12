@@ -1229,8 +1229,8 @@ if run:
     deck = pdk.Deck(
         layers=[layer],
         initial_view_state=view_state,
-        map_provider="carto",     # ⭐ REQUIRED
-        map_style="light",        # ⭐ WORKS WITHOUT TOKEN
+        map_provider="carto",    
+        map_style="light",        
         tooltip={"html": "<b>{Fshati/Qyteti}</b><br>{Intervista} intervista"}
     )
 
