@@ -2265,6 +2265,7 @@ elif data_collection_method=="CATI":
     methodology_label = "Computer-Assisted Telephone Interviewing (CATI)"
 
 elif data_collection_method=="CAWI":
+    survey_label = "individual"
     methodology_label = "Computer-Assisted Web Interviewing (CAWI)"
 
 st.sidebar.markdown("---")
