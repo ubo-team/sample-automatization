@@ -96,7 +96,7 @@ st.markdown("""
 narrative_template_common = """
 **Methodology and Sampling Frame**
 
-The National Social Survey for Kosovo is based on the principles of {survey_label} survey methodology. In more specific terms, the collection of data for this quantitative study is executed through {methodology_label}.The proposed sample of **N={n_total}** has a 95% of confidence level with a **{moe}** of margin of error.
+The National Social Survey for Kosovo is based on the principles of {survey_label} survey methodology. In more specific terms, the collection of data for this quantitative study is executed through {methodology_label}. The proposed sample of **N={n_total}** has a 95% of confidence level with a **{moe}** of margin of error.
 The sample design is based on a modified multistage random sampling methodology. Crucially, the sampling frame is constructed using a dual-source approach to address recent demographic data challenges:
 
 - **General Population**: For the majority of municipalities, the sample design is based on the preliminary results of the Kosovo Census 2024, conducted by the Kosovo Agency of Statistics (KAS).
