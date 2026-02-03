@@ -19,3 +19,4 @@ pydeck
 
 gspread
 google.oauth2.service_account
+google.oauth2
