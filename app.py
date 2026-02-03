@@ -148,7 +148,7 @@ with col1:
 with col2:
     menu_column(
         "Mostra komunale",
-        "Gjeneroni ndarjen e mostrës në nivel komune sipas vendbanimit dhe etnisë. Lejon aplikimin e filterëve demografikë dhe oversampling.",
+        "Gjeneroni ndarjen e mostrës në nivel komune sipas vendbanimit, të ndarë në urban dhe fshatra. Lejon aplikimin e filterëve demografikë.",
         "pages/municipality_sample.py",
         "images/municipality.png",
         "btn_kom"

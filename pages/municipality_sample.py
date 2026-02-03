@@ -3,6 +3,8 @@ import base64
 import pandas as pd
 import numpy as np
 import pydeck as pdk
+from google.oauth2.service_account import Credentials
+import gspread
 
 # =====================================================
 # PAGE SETTINGS & HEADER
@@ -912,6 +914,163 @@ def generate_spss_syntax_municipality(coef_df, data_collection_method, min_age, 
     out += "FINALWEIGHT=peshat.\n"
 
     return out
+
+@st.cache_data(show_spinner="Duke ngarkuar listën e kontakteve...")
+def load_citizens_database():
+    # Merr kredencialet nga st.secrets
+    gcp_info = st.secrets["gcp_service_account"]
+    
+    # Deklaro scope të qartë për Google Sheets
+    scopes = [
+    "https://www.googleapis.com/auth/spreadsheets",
+    "https://www.googleapis.com/auth/drive"]
+    
+    # Krijo kredencialet me scope
+    credentials = Credentials.from_service_account_info(gcp_info, scopes=scopes)
+    
+    # Autorizo me gspread
+    gc = gspread.authorize(credentials)
+    
+    # Hap dokumentin dhe worksheet-in
+    sheet = gc.open("Databaza e kontakteve të qytetarëve").worksheet("Sheet1")
+    df = pd.DataFrame(sheet.get_all_records())
+
+    return df
+
+def filter_contacts(
+    df_contacts: pd.DataFrame,
+    *,
+    komuna_filter: str,
+    gender_selected: list[str],
+    min_age: int,
+    max_age: int | None
+) -> pd.DataFrame:
+
+    df = df_contacts.copy()
+
+    # --------------------------------------------------
+    # 1. Mandatory non-null checks
+    # --------------------------------------------------
+    df = df[
+        df["Emri dhe mbiemri"].notna() &
+        df["Numri i telefonit"].notna()
+    ]
+
+    df = df[
+        (df["Emri dhe mbiemri"] != "0") &
+        (df["Numri i telefonit"] != "0")
+    ]
+
+    # --------------------------------------------------
+    # 3. Municipality filter (from sidebar filters)
+    # --------------------------------------------------
+    df = df[df["Komuna"] == komuna_filter]
+
+    # --------------------------------------------------
+    # 4. Gender filter
+    # --------------------------------------------------
+    if gender_selected:
+
+        gender_map = {
+        "Meshkuj": "Mashkull",
+        "Femra": "Femër"
+        }
+
+        mapped_selected = [gender_map.get(g, g) for g in gender_selected]
+
+        df = df[df["Gjinia"].isin(mapped_selected)]
+
+    # --------------------------------------------------
+    # 5. Age filter
+    # --------------------------------------------------
+    df["Mosha"] = pd.to_numeric(df["Mosha"], errors="coerce")
+
+    if max_age is None:
+        df = df[df["Mosha"] >= min_age]
+    else:
+        df = df[(df["Mosha"] >= min_age) & (df["Mosha"] <= max_age)]
+    
+    return df.reset_index(drop=True)
+
+def build_contact_list(
+    df_contacts: pd.DataFrame,
+    pivot: pd.DataFrame,
+    *,
+    reserve_mode: str,
+    reserve_percentage: int | None,
+    reserve_ratio: int | None,
+    seed: int = 42
+) -> pd.DataFrame:
+
+    rng = np.random.default_rng(seed)
+    rows = []
+
+    # ----------------------------
+    # Read Total & Urban
+    # ----------------------------
+    total_row = pivot[pivot["Fshati/Qyteti"] == "Total"]
+    urban_row = pivot[pivot["Fshati/Qyteti"] == "Urban"]
+
+    if total_row.empty:
+        return pd.DataFrame()
+
+    total_n = int(total_row["Intervista"].iloc[0])
+    urban_n = int(urban_row["Intervista"].iloc[0]) if not urban_row.empty else 0
+
+    rural_n = max(total_n - urban_n, 0)
+
+    settlement_plan = {
+        "Urban": urban_n,
+        "Rural": rural_n
+    }
+
+    for settlement, interviews in settlement_plan.items():
+        if interviews <= 0:
+            continue
+
+        # ----------------------------
+        # Filter contacts ONLY by
+        # Vendbanimi
+        # ----------------------------
+        dfk = df_contacts[df_contacts["Vendbanimi"] == settlement]
+
+        if dfk.empty:
+            continue
+
+        # ----------------------------
+        # Required contacts
+        # ----------------------------
+        if reserve_mode == "Proporcion":
+            required = interviews * reserve_ratio
+        else:
+            required = interviews + int(
+                np.ceil(interviews * reserve_percentage / 100)
+            )
+
+        # ----------------------------
+        # Sample contacts
+        # ----------------------------
+        if len(dfk) <= required:
+            sample = dfk.copy()
+        else:
+            sample = dfk.sample(
+                n=required,
+                replace=False,
+                random_state=seed
+            )
+
+        sample["Vendbanimi"] = settlement
+        sample["Intervista_plan"] = interviews
+        sample["Kontakt_kërkuar"] = required
+        sample["Kontakt_marrë"] = len(sample)
+
+        rows.append(sample)
+
+    if not rows:
+        return pd.DataFrame()
+
+    return pd.concat(rows, ignore_index=True)
+
 # =====================================================
 # LOAD PSU DATA
 # =====================================================
@@ -945,6 +1104,39 @@ data_collection_method = st.sidebar.selectbox(
     index=0,
     key="Metoda për komuna"
 )
+
+if data_collection_method == "CATI":
+    st.sidebar.markdown("---")
+
+    st.sidebar.subheader("Rezervat për kontakte")
+
+    reserve_mode = st.sidebar.radio(
+        "Metoda për llogaritjen e rezervave:",
+        ["Përqindje (%)", "Proporcion"],
+        index=0
+    )
+
+    reserve_percentage = None
+    reserve_ratio = None
+
+    if reserve_mode == "Përqindje (%)":
+        reserve_percentage = st.sidebar.number_input(
+            "Shkruaj përqindjen e rezervave (%)",
+            min_value=1,
+            max_value=500,
+            value=20,
+            step=10
+        )
+
+    elif reserve_mode == "Proporcion":
+        reserve_ratio = st.sidebar.number_input(
+            "Vendos numrin për proporcion (p.sh. 2 për 2:1)",
+            min_value=1,
+            max_value=10,
+            value=2,
+            step=1
+        ) 
+
 
 st.sidebar.markdown("---")
 st.sidebar.subheader("Filtrat demografikë")
@@ -1193,7 +1385,7 @@ if run:
     )
 
     # =====================================================
-    # 6) INTERACTIVE MAP WITH FOLIUM (Urban removed)
+    # 6) INTERACTIVE MAP WITH FOLIUM
     # =====================================================
 
     st.subheader("Harta e vendeve të përzgjedhura në mostër")
@@ -1239,6 +1431,67 @@ if run:
     html_bytes = deck_html.encode("utf-8")
     # Butoni i shkarkimit
     create_download_link(html_bytes, "psu_map.html", "Shkarko hartën (HTML)")
+
+    if data_collection_method == "CATI":
+
+        st.markdown("---")
+        st.subheader("Lista e kontakteve")
+
+        df_contacts_raw = load_citizens_database()
+
+        df_contacts_filtered = filter_contacts(
+            df_contacts_raw,
+            komuna_filter=komuna,
+            gender_selected=gender_selected,
+            min_age=min_age,
+            max_age=max_age
+        )
+
+        if df_contacts_filtered.empty:
+            st.warning("Nuk ka kontakte që përputhen me filtrat e zgjedhur.")
+        else:
+            df_contacts_final = build_contact_list(
+                df_contacts=df_contacts_filtered,
+                pivot=sample,
+                reserve_mode=reserve_mode,
+                reserve_percentage=reserve_percentage,
+                reserve_ratio=reserve_ratio
+            )
+
+            if df_contacts_final.empty:
+                st.warning("Nuk u gjenerua asnjë listë kontakti.")
+            else:
+
+                display_cols = [
+                    "Emri dhe mbiemri",
+                    "Numri i telefonit",
+                    "Gjinia",
+                    "Mosha",
+                    "Komuna",
+                    "Vendbanimi",
+                    "Etnia",
+                    "Edukimi",
+                    "Punësimi",
+                    "Statusi martesor",
+                    "Të ardhurat familjare",
+                    "Të ardhurat personale"
+                ]
+
+                st.dataframe(
+                    df_contacts_final[display_cols],
+                    use_container_width=True
+                )
+
+                excel_bytes = df_to_excel_bytes(
+                    df_contacts_final[display_cols],
+                    sheet_name="Kontaktet_CATI"
+                )
+
+                create_download_link(
+                    excel_bytes,
+                    "lista_kontakteve_cati.xlsx",
+                    "Shkarko Listën e Kontakteve"
+                )
     
     coef_df = compute_population_coefficients(
     df_ga=df_ga,
