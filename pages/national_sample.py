@@ -1954,28 +1954,31 @@ def compute_population_coefficients(
     append_block("Regjion", pd.Series(reg_totals))
 
     # -------------------------------------------------------------
-    # 5) ETHNIC SHARES (df_eth in long format)
+    # 5) ETHNIC SHARES (df_eth in long format) - FIXED
     # -------------------------------------------------------------
-    ethnic_shares = {}
 
-    for kom in df_eth_f["Komuna"].unique():
-        dfk = df_eth_f[df_eth_f["Komuna"] == kom]
-        eth_group = dfk.groupby("Etnia")["Pop_base"].sum()
+    # Step 2: Get the SAME coefficients used in sample allocation
+    coef_by_komuna_for_weights = compute_gender_age_coefficients(
+        df_ga,
+        age_cols=age_cols,
+        selected_genders=gender_selected,
+        min_age=min_age,
+        max_age=max_age
+    )
 
-        if eth_group.sum() == 0:
-            continue
+    # Step 3: Apply coefficient to each ethnicity's base population
+    df_eth_f_adj = df_eth_f.copy()
+    df_eth_f_adj["coef"] = df_eth_f_adj["Komuna"].map(coef_by_komuna_for_weights).fillna(0.0)
+    df_eth_f_adj["Pop_adj"] = df_eth_f_adj["Pop_base"] * df_eth_f_adj["coef"]
 
-        ethnic_shares[kom] = (eth_group / eth_group.sum()).to_dict()
+    # Step 4: Sum by ethnicity across all municipalities
+    derived_eth_totals = df_eth_f_adj.groupby("Etnia")["Pop_adj"].sum().to_dict()
 
-    # Derived ETHNIC population
+    # Fill in any missing ethnicities with 0
     eth_categories = sorted(df_eth_f["Etnia"].unique())
-    derived_eth_totals = {e: 0 for e in eth_categories}
-
-    for kom, popk in pop_kom_derived.items():
-        if kom not in ethnic_shares:
-            continue
-        for eth, share in ethnic_shares[kom].items():
-            derived_eth_totals[eth] += popk * share
+    for eth in eth_categories:
+        if eth not in derived_eth_totals:
+            derived_eth_totals[eth] = 0
 
     append_block("Etnia", pd.Series(derived_eth_totals))
 
