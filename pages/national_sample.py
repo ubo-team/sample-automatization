@@ -1852,6 +1852,7 @@ def create_download_link2(file_bytes: bytes, filename: str, label: str):
             </a>
         """
     st.markdown(button_html, unsafe_allow_html=True)
+    
 def compute_population_coefficients(
     df_ga,
     df_eth,
@@ -1865,35 +1866,35 @@ def compute_population_coefficients(
     data_collection_method
 ):
     """
-    Funksioni FINAL profesional për llogaritjen e peshave të popullsisë.
-    Punon me df_eth në format LONG (Komuna, Vendbanimi, Etnia, Pop_base)
-    dhe df_ga në formatin (Komuna, Gjinia, 0..120, Gjithsej).
-
-    UNIVERSI I POPULLSISË = popullsia e komunës min_age → max_age (default 120).
+    REWRITTEN: Professional calculation of population weights.
+    All dimensions now use CONSISTENT methodology matching sample allocation.
+    
+    Key principle: Pop_adj = Pop_base × coef (for ethnicity-based dimensions)
+                   Pop_adj = direct sum (for gender/age dimensions - already filtered)
     """
 
     out = []
 
     # -------------------------------------------------------------
-    # 0) Filtrimi i df_eth dhe df_ga për komunat e kërkuara
+    # 0) Filter source data
     # -------------------------------------------------------------
     df_eth_f = df_eth[df_eth["Komuna"].isin(komuna_filter)].copy()
     df_eth_f = df_eth_f[df_eth_f["Vendbanimi"].isin(settlement_filter)]
-
-    if eth_filter:  # Nëse janë zgjedhur etni specifike
+    
+    if eth_filter:
         df_eth_f = df_eth_f[df_eth_f["Etnia"].isin(eth_filter)]
-
+    
     if df_eth_f.empty:
         return pd.DataFrame()
-
+    
     df_ga_f = df_ga[df_ga["Komuna"].isin(komuna_filter)].copy()
     df_ga_f = df_ga_f[df_ga_f["Gjinia"].isin(gender_selected)]
-
+    
     if df_ga_f.empty:
         return pd.DataFrame()
 
     # -------------------------------------------------------------
-    # 1) Defino moshat dhe zgjedh kolonat për kalkulim
+    # 1) Define age columns and selected age range
     # -------------------------------------------------------------
     age_columns = []
     for c in df_ga.columns:
@@ -1901,27 +1902,31 @@ def compute_population_coefficients(
             age_columns.append(int(c))
         except:
             continue
-
-    # Nëse nuk ka max_age → max_age = 120
+    
     if max_age is None:
         max_age = 200
-
+    
     selected_age_cols = [a for a in age_columns if min_age <= a <= max_age]
-
-    # -------------------------------------------------------------
-    # 2) Derived population per Komuna = Σ(mosha min_age→max_age)
-    # -------------------------------------------------------------
-    df_ga_f["pop_age_range"] = df_ga_f[selected_age_cols].sum(axis=1)
-    pop_kom_derived = df_ga_f.groupby("Komuna")["pop_age_range"].sum()
-    pop_kom_derived = pop_kom_derived[pop_kom_derived > 0]
-
-    if pop_kom_derived.empty:
+    
+    if not selected_age_cols:
         return pd.DataFrame()
 
     # -------------------------------------------------------------
-    # Helper për të vendosur një dimension në tabelën finale
+    # 2) Compute gender/age coefficients ONCE (use for all eth-based dimensions)
+    # -------------------------------------------------------------
+    coef_by_komuna_universal = compute_gender_age_coefficients(
+        df_ga,
+        age_cols=age_columns,
+        selected_genders=gender_selected,
+        min_age=min_age,
+        max_age=max_age
+    )
+
+    # -------------------------------------------------------------
+    # Helper function to avoid repetition
     # -------------------------------------------------------------
     def append_block(dim, series):
+        """Add a dimension block to output if it has multiple categories."""
         s = series[series > 0]
         if len(s) < 2:
             return
@@ -1935,166 +1940,136 @@ def compute_population_coefficients(
                 "Pesha": float(weights[cat])
             })
 
+    def compute_dimension_from_eth(dimension_col):
+        """
+        Generic function to compute adjusted population for dimensions from df_eth.
+        Matches sample allocation: Pop_adj = Pop_base × coef
+        """
+        df_temp = df_eth_f.copy()
+        df_temp["coef"] = df_temp["Komuna"].map(coef_by_komuna_universal).fillna(0.0)
+        df_temp["Pop_adj"] = df_temp["Pop_base"] * df_temp["coef"]
+        
+        totals = df_temp.groupby(dimension_col)["Pop_adj"].sum()
+        return totals[totals > 0]
+
     # -------------------------------------------------------------
-    # 3) Dimensioni: Komuna (always derived population)
+    # 3) KOMUNA - Apply coefficient to ethnicity base population
     # -------------------------------------------------------------
+    pop_kom_derived = compute_dimension_from_eth("Komuna")
+    
+    if pop_kom_derived.empty:
+        return pd.DataFrame()
+    
     append_block("Komuna", pop_kom_derived)
 
     # -------------------------------------------------------------
-    # 4) Dimensioni: Regjion (sum of derived komuna)
+    # 4) REGJION - Sum of municipalities within each region
     # -------------------------------------------------------------
     reg_totals = {}
-
     for kom, popv in pop_kom_derived.items():
         reg = region_map.get(kom)
         if reg:
             reg_totals.setdefault(reg, 0)
             reg_totals[reg] += popv
-
-    append_block("Regjion", pd.Series(reg_totals))
-
-    # -------------------------------------------------------------
-    # 5) ETHNIC SHARES (df_eth in long format) - FIXED
-    # -------------------------------------------------------------
-
-    # Step 2: Get the SAME coefficients used in sample allocation
-    coef_by_komuna_for_weights = compute_gender_age_coefficients(
-        df_ga,
-        age_cols=age_cols,
-        selected_genders=gender_selected,
-        min_age=min_age,
-        max_age=max_age
-    )
-
-    # Step 3: Apply coefficient to each ethnicity's base population
-    df_eth_f_adj = df_eth_f.copy()
-    df_eth_f_adj["coef"] = df_eth_f_adj["Komuna"].map(coef_by_komuna_for_weights).fillna(0.0)
-    df_eth_f_adj["Pop_adj"] = df_eth_f_adj["Pop_base"] * df_eth_f_adj["coef"]
-
-    # Step 4: Sum by ethnicity across all municipalities
-    derived_eth_totals = df_eth_f_adj.groupby("Etnia")["Pop_adj"].sum().to_dict()
-
-    # Fill in any missing ethnicities with 0
-    eth_categories = sorted(df_eth_f["Etnia"].unique())
-    for eth in eth_categories:
-        if eth not in derived_eth_totals:
-            derived_eth_totals[eth] = 0
-
-    append_block("Etnia", pd.Series(derived_eth_totals))
+    
+    if reg_totals:
+        append_block("Regjion", pd.Series(reg_totals))
 
     # -------------------------------------------------------------
-    # 6) SETTLEMENT SHARES (df_eth long format)
+    # 5) ETNIA - Apply coefficient to ethnicity base population
     # -------------------------------------------------------------
-    settlement_shares = {}
-
-    for kom in df_eth_f["Komuna"].unique():
-        dfk = df_eth_f[df_eth_f["Komuna"] == kom]
-        vb_group = dfk.groupby("Vendbanimi")["Pop_base"].sum()
-
-        if vb_group.sum() == 0:
-            continue
-
-        settlement_shares[kom] = (vb_group / vb_group.sum()).to_dict()
-
-    derived_vb_totals = {vb: 0 for vb in df_eth_f["Vendbanimi"].unique()}
-
-    for kom, popk in pop_kom_derived.items():
-        if kom not in settlement_shares:
-            continue
-        for vb, share in settlement_shares[kom].items():
-            derived_vb_totals[vb] += popk * share
-
-    append_block("Vendbanimi", pd.Series(derived_vb_totals))
+    derived_eth = compute_dimension_from_eth("Etnia")
+    append_block("Etnia", derived_eth)
 
     # -------------------------------------------------------------
-    # 7) GENDER SHARES for age range
+    # 6) VENDBANIMI - Apply coefficient to settlement base population
     # -------------------------------------------------------------
-    # compute gender-specific totals per commune
-    gender_shares = {}
+    derived_vb = compute_dimension_from_eth("Vendbanimi")
+    append_block("Vendbanimi", derived_vb)
 
-    for kom in df_ga_f["Komuna"].unique():
+    # -------------------------------------------------------------
+    # 7) GJINIA - Direct sum from age-filtered population
+    # -------------------------------------------------------------
+    gender_totals = {}
+    
+    for kom in komuna_filter:
         dfk = df_ga[df_ga["Komuna"] == kom].copy()
-        dfk["pop"] = dfk[selected_age_cols].sum(axis=1)
-        total = dfk["pop"].sum()
-        if total == 0:
-            continue
-        gtot = dfk.groupby("Gjinia")["pop"].sum()
-        gender_shares[kom] = (gtot / total).to_dict()
-
-    gender_categories = df_ga_f["Gjinia"].unique()
-    derived_gender_totals = {g: 0 for g in gender_categories}
-
-    for kom, popk in pop_kom_derived.items():
-        if kom not in gender_shares:
-            continue
-        for g, share in gender_shares[kom].items():
-            derived_gender_totals[g] += popk * share
-
-    append_block("Gjinia", pd.Series(derived_gender_totals))
+        
+        # Filter by selected genders
+        dfk = dfk[dfk["Gjinia"].isin(gender_selected)]
+        
+        # Sum only selected age columns
+        dfk["pop_age_range"] = dfk[selected_age_cols].sum(axis=1)
+        
+        # Aggregate by gender
+        gender_sums = dfk.groupby("Gjinia")["pop_age_range"].sum()
+        
+        for gender, pop in gender_sums.items():
+            gender_totals.setdefault(gender, 0)
+            gender_totals[gender] += pop
+    
+    if gender_totals:
+        append_block("Gjinia", pd.Series(gender_totals))
 
     # -------------------------------------------------------------
-    # 8) AGE GROUPS (dynamic bins)
+    # 8) GRUPMOSHA - Direct count from age-filtered population with dynamic bins
     # -------------------------------------------------------------
     merged_bins, labels = create_dynamic_age_groups(min_age, max_age, data_collection_method)
-    derived_age_totals = {label: 0 for label in labels}
-
-    for kom, popk in pop_kom_derived.items():
-
+    age_totals = {label: 0 for label in labels}
+    
+    for kom in komuna_filter:
         dfk = df_ga[df_ga["Komuna"] == kom].copy()
-        dfk["pop"] = dfk[selected_age_cols].sum(axis=1)
-        total = dfk["pop"].sum()
-        if total == 0:
-            continue
-
-        group_counts = {label: 0 for label in labels}
-
+        
+        # Filter by selected genders
+        dfk = dfk[dfk["Gjinia"].isin(gender_selected)]
+        
+        # Count population by age group
         for _, row in dfk.iterrows():
             for col in selected_age_cols:
                 age = int(col)
                 v = row[col]
+                
+                if v <= 0:
+                    continue
+                
+                # Find which bin this age belongs to
                 for (lo, hi), label in zip(merged_bins, labels):
                     if lo <= age <= hi:
-                        group_counts[label] += v
+                        age_totals[label] += v
                         break
-
-        # now derive
-        for label in labels:
-            share = group_counts[label] / total
-            derived_age_totals[label] += popk * share
-
-    append_block("Grupmosha", pd.Series(derived_age_totals))
+    
+    if age_totals:
+        append_block("Grupmosha", pd.Series(age_totals))
 
     # -------------------------------------------------------------
-    # 9) APPLY CONTROLLED ROUNDING TO Populacioni PER DIMENSION
+    # 9) Apply controlled rounding to Populacioni per dimension
     # -------------------------------------------------------------
     if not out:
         return pd.DataFrame()
-
+    
     df_final = pd.DataFrame(out)
-
+    
     rounded_blocks = []
-
+    
     for dim in df_final["Dimensioni"].unique():
-
         d = df_final[df_final["Dimensioni"] == dim].copy()
-
+        
         pop_vec = d["Populacioni"].values
         total_pop = pop_vec.sum()
-
-        # Apply your own controlled rounding function
+        
+        # Apply controlled rounding
         rounded = controlled_rounding(pop_vec, total_pop)
-
+        
         d["Populacioni"] = rounded
-
+        
         # Recompute weights using rounded populations
         d["Pesha"] = d["Populacioni"] / d["Populacioni"].sum()
-
+        
         rounded_blocks.append(d)
-
+    
     df_final = pd.concat(rounded_blocks, ignore_index=True)
-
+    
     return df_final
-
 
 def add_codes_to_coef_df(coef_df, data_collection_method):
     """
@@ -2730,12 +2705,12 @@ if run_button:
     )
 
     # Mapojmë gjininë origjinale në df_eth duke përdorur df_ga si referencë
-    gender_map = df_ga.groupby("Komuna")["Gjinia"].apply(list).to_dict()
+    #gender_map = df_ga.groupby("Komuna")["Gjinia"].apply(list).to_dict()
 
-    df["Gjinia"] = df["Komuna"].map(lambda k: gender_map.get(k, ["Meshkuj","Femra"]))
+    #df["Gjinia"] = df["Komuna"].map(lambda k: gender_map.get(k, ["Meshkuj","Femra"]))
                     
     # zgjerim i rreshtave për çdo gjini (ndryshe OS nuk punon)
-    df = df.explode("Gjinia")
+    #df = df.explode("Gjinia")
 
     # Attach coefficient to df (missing komuna -> coef 0)
     df["coef_gender_age"] = df["Komuna"].map(coef_by_komuna).fillna(0.0)
@@ -2790,6 +2765,52 @@ if run_button:
     )
 
     grouped = grouped.reset_index(drop=True)
+
+    # Calculate actual gender shares per municipality
+    gender_shares = {}
+
+    age_cols_sorted = sorted(age_cols, key=lambda x: int(str(x)))
+    max_age_use = max_age if max_age is not None else int(str(age_cols_sorted[-1]))
+
+    selected_age_cols_for_gender = [
+        c for c in age_cols_sorted
+        if min_age <= int(str(c)) <= max_age_use
+    ]
+
+    for kom in grouped[base_col].unique():
+        dfk = df_ga[df_ga["Komuna"] == kom].copy()
+        dfk = dfk[dfk["Gjinia"].isin(gender_selected)]
+        
+        if dfk.empty:
+            continue
+        
+        dfk["pop_age_range"] = dfk[selected_age_cols_for_gender].sum(axis=1)
+        gender_totals = dfk.groupby("Gjinia")["pop_age_range"].sum()
+        total = gender_totals.sum()
+        
+        if total > 0:
+            gender_shares[kom] = (gender_totals / total).to_dict()
+        else:
+            gender_shares[kom] = {g: 1.0/len(gender_selected) for g in gender_selected}
+
+    # Explode by actual gender ratios
+    grouped_with_gender = []
+
+    for idx, row in grouped.iterrows():
+        kom = row[base_col]
+        pop = row["Pop_stratum"]
+        
+        if kom not in gender_shares:
+            grouped_with_gender.append(row.to_dict())
+            continue
+        
+        for gender, share in gender_shares[kom].items():
+            new_row = row.to_dict()
+            new_row["Gjinia"] = gender
+            new_row["Pop_stratum"] = pop * share
+            grouped_with_gender.append(new_row)
+
+    grouped = pd.DataFrame(grouped_with_gender)
 
     precomputed_masks = {}
     for var, entry_list in oversample_inputs.items():
