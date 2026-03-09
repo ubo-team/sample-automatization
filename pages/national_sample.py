@@ -2726,19 +2726,17 @@ if run_button:
         st.stop()
 
     # 4) Primary stratification
+    # Always compute at municipality level; region is only used for display aggregation.
     if primary_level == "Regjion":
         if not region_map:
             st.warning(
                 "Ndarja sipas Regjionit kërkon të plotësohet 'region_map' në kod. "
                 "Aktualisht nuk ka mapping, prandaj po vazhdohet vetëm me nivel Komune."
             )
-            base_col = "Komuna"
         else:
             df["Regjion"] = df["Komuna"].map(region_map)
             df = df.dropna(subset=["Regjion"])
-            base_col = "Regjion"
-    else:
-        base_col = "Komuna"
+    base_col = "Komuna"
 
     # 5) Sub-stratification labels
     # Ensure consistent sorting at ethnicity
@@ -3281,8 +3279,24 @@ if run_button:
             """, unsafe_allow_html=True)
 
     st.subheader("Tabela e ndarjes së mostrës")
-    
-    st.dataframe(pivot, use_container_width=True)
+
+    if primary_level == "Regjion" and region_map:
+        _pivot_rows = pivot[pivot.index != "Total"].copy()
+        _pivot_rows["Regjion"] = _pivot_rows.index.map(region_map)
+        _pivot_rows = _pivot_rows.dropna(subset=["Regjion"])
+        _num_cols = [c for c in _pivot_rows.columns if c != "Regjion"]
+        pivot_region = _pivot_rows.groupby("Regjion")[_num_cols].sum()
+        pivot_region.loc["Total"] = pivot_region.sum()
+        st.dataframe(pivot_region, use_container_width=True)
+    else:
+        pivot_region = None
+        if region_map:
+            pivot_display = pivot.copy()
+            pivot_display.insert(0, "Regjion", pivot_display.index.map(region_map))
+            pivot_display.at["Total", "Regjion"] = ""
+        else:
+            pivot_display = pivot
+        st.dataframe(pivot_display, use_container_width=True)
 
     if global_total != n_total:
         st.warning(
@@ -3297,7 +3311,8 @@ if run_button:
 
 
     # 📘 Pivot table (Excel)
-    pivot_excel = df_to_excel_bytes(pivot, sheet_name="Mostra")
+    pivot_to_download = pivot_region if pivot_region is not None else pivot_display
+    pivot_excel = df_to_excel_bytes(pivot_to_download, sheet_name="Mostra")
     create_download_link(
         file_bytes=pivot_excel,
         filename="mostra_e_gjeneruar.xlsx",
