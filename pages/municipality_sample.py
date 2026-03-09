@@ -167,7 +167,7 @@ def get_region_mapping() -> dict:
         "Mamushë": "Prizren",
         "Mitrovicë": "Mitrovicë",
         "Mitrovica Veriore": "Mitrovicë",
-        "Novobërdë": "Gjilan",
+        "Novobërdë": "Prishtinë",
         "Obiliq": "Prishtinë",
         "Partesh": "Gjilan",
         "Pejë": "Pejë",
