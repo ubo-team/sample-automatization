@@ -1295,7 +1295,7 @@ if run_button:
         # RESERVE ALLOCATION BASED ON SELECTED MODE
         # ----------------------------------------------------
         if  reserve_mode == "Përqindje (%)":
-            reserve_n = int(intervista * (reserve_percentage / 100))
+            reserve_n = intervista + int(intervista * (reserve_percentage / 100))
 
         elif reserve_mode == "Proporcion":
             reserve_n = int(intervista * (reserve_ratio - 1))
