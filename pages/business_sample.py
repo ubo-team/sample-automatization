@@ -1431,7 +1431,7 @@ if run_button:
         charA_intro = ""
     
     charA_var_eng = translate(charA_var)
-    charB_var_eng = translate(charA_var)
+    charB_var_eng = translate(charB_var)
 
     stage2_text = build_narrative_stage2(
     charA_var_eng,
