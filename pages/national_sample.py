@@ -227,6 +227,13 @@ TRANSLATIONS = {
     "Shqiptar": "Albanian",
     "Serb": "Serb",
     "Tjerë": "Other",
+    "Boshnjak": "Bosniak",
+    "Turk": "Turk",
+    "Rom": "Roma",
+    "Ashkali": "Ashkali",
+    "Egjiptian": "Egyptian",
+    "Goran": "Gorani",
+    "Të tjerë": "Other",
 
     # ====================
     # VALUES: Regions
@@ -240,6 +247,12 @@ TRANSLATIONS = {
     "Pejë": "Peja",
 }
 
+# Individual ethnicities used when ethnicity grouping is turned OFF.
+# (Excludes "Preferoj të mos përgjigjem", which is a non-response, not an ethnicity.)
+UNGROUPED_ETH_CATEGORIES = [
+    "Shqiptar", "Serb", "Boshnjak", "Turk", "Rom",
+    "Ashkali", "Egjiptian", "Goran", "Të tjerë"
+]
 
 
 # =========================
@@ -274,6 +287,44 @@ def load_ethnicity_settlement_data(path: str) -> pd.DataFrame:
         value_name="Pop_base"
     )
     # Clean
+    df_long["Etnia"] = df_long["Etnia"].str.strip()
+    df_long["Vendbanimi"] = df_long["Vendbanimi"].str.strip()
+    df_long["Komuna"] = df_long["Komuna"].str.strip()
+    df_long["Pop_base"] = df_long["Pop_base"].fillna(0).astype(float)
+    return df_long
+
+
+@st.cache_data
+def load_ethnicity_settlement_data_ungrouped(path: str) -> pd.DataFrame:
+    """
+    Build an UNGROUPED ethnicity dataset from the settlement-level PSU file
+    (ASK-2024-Komuna-Vendbanim-Fshat+Qytet.xlsx).
+
+    The standard ethnicity file only contains the three grouped columns
+    (Shqiptar, Serb, Tjerë). The individual ethnicities only exist in the PSU
+    file, so we aggregate them up to (Komuna, Vendbanimi) and melt to the same
+    long format as load_ethnicity_settlement_data():
+        Komuna | Vendbanimi | Etnia | Pop_base
+    'Preferoj të mos përgjigjem' is intentionally excluded (non-response).
+    """
+    df = pd.read_excel(path)
+    df["Komuna"] = df["Komuna"].astype(str).str.strip()
+    df["Vendbanimi"] = df["Vendbanimi"].astype(str).str.strip()
+
+    eth_cols = list(UNGROUPED_ETH_CATEGORIES)
+    for c in eth_cols:
+        if c not in df.columns:
+            df[c] = 0.0
+        df[c] = pd.to_numeric(df[c], errors="coerce").fillna(0).astype(float)
+
+    agg = df.groupby(["Komuna", "Vendbanimi"], as_index=False)[eth_cols].sum()
+
+    df_long = agg.melt(
+        id_vars=["Komuna", "Vendbanimi"],
+        value_vars=eth_cols,
+        var_name="Etnia",
+        value_name="Pop_base"
+    )
     df_long["Etnia"] = df_long["Etnia"].str.strip()
     df_long["Vendbanimi"] = df_long["Vendbanimi"].str.strip()
     df_long["Komuna"] = df_long["Komuna"].str.strip()
@@ -2101,7 +2152,14 @@ def add_codes_to_coef_df(coef_df, data_collection_method):
 
     vb_codes = {"Urban":1, "Rural":2}
     gender_codes = {"Femra":1, "Femer":1, "Mashkull":2, "Meshkuj":2}
-    eth_codes = {"Shqiptar":1, "Serb":2, "Tjerë":3, "Tjeter":3}
+    # Grouped mode: Shqiptar/Serb/Tjerë. Ungrouped mode: individual ethnicities.
+    # (Ungrouped codes are a sensible default ordering; adjust to match the
+    #  questionnaire's ethnicity variable if needed.)
+    eth_codes = {
+        "Shqiptar":1, "Serb":2, "Tjerë":3, "Tjeter":3,
+        "Boshnjak":3, "Turk":4, "Rom":5, "Ashkali":6,
+        "Egjiptian":7, "Goran":8, "Të tjerë":9
+    }
 
     # ==========================
     # 2. Fillimisht vendos kodet fikse
@@ -2356,7 +2414,9 @@ def generate_map_url(lat, lon, zoom):
 
 # Load data
 try:
-    df_eth = load_ethnicity_settlement_data("excel-files/ASK-2024-Komuna-Etnia-Vendbanimi.xlsx")
+    df_eth_grouped = load_ethnicity_settlement_data("excel-files/ASK-2024-Komuna-Etnia-Vendbanimi.xlsx")
+    df_eth_ungrouped = load_ethnicity_settlement_data_ungrouped("excel-files/ASK-2024-Komuna-Vendbanim-Fshat+Qytet.xlsx")
+    df_eth = df_eth_grouped
     df_ga, age_cols = load_gender_age_data("excel-files/ASK-2024-Komuna-Gjinia-Mosha.xlsx")
 except Exception as e:
     st.error(f"Gabim gjatë leximit të fajllave: {e}")
@@ -2399,6 +2459,21 @@ sub_options = st.sidebar.multiselect(
     options=["Vendbanim", "Etnia"],
     default=["Vendbanim", "Etnia"]
 )
+
+# Ethnicity grouping toggle — appears only when Etnia is a sub-dimension.
+# Checked (default): ethnicities are grouped (Shqiptar, Serb, Tjerë), as before.
+# Unchecked: use individual ethnicities (Boshnjak, Turk, Rom, ...) with no grouping.
+group_ethnicities = True
+if "Etnia" in sub_options:
+    group_ethnicities = st.sidebar.checkbox(
+        "Etnitë e grupuara",
+        value=True,
+        help="Nëse e çaktivizoni, etnitë nuk grupohen në 'Tjerë' por përdoren "
+             "veçmas (Boshnjak, Turk, Rom, Ashkali, Egjiptian, Goran, Të tjerë)."
+    )
+
+# Pick the active ethnicity dataset based on the grouping choice.
+df_eth = df_eth_grouped if group_ethnicities else df_eth_ungrouped
 
 st.sidebar.markdown("---")
 st.sidebar.subheader("Mbledhja e të dhënave")
@@ -2538,11 +2613,17 @@ max_age = st.sidebar.text_input(
 max_age = int(max_age) if max_age.strip() else None
 
 # Ethnicity filter (these also act as possible sub-dimensions if Etnia selected)
+if group_ethnicities:
+    eth_options = ["Shqiptar", "Serb", "Tjerë"]
+else:
+    eth_options = list(UNGROUPED_ETH_CATEGORIES)
+
+# Mode-specific key so toggling grouping doesn't keep stale selections.
 eth_filter = st.sidebar.multiselect(
     "Etnitë që përfshihen",
-    options=["Shqiptar", "Serb", "Tjerë"],
-    default=["Shqiptar", "Serb", "Tjerë"], 
-    key = "Etnia-nacionale"
+    options=eth_options,
+    default=eth_options,
+    key="Etnia-nacionale-grup" if group_ethnicities else "Etnia-nacionale-ungroup"
 )
 
 # Settlement filter
@@ -2740,7 +2821,10 @@ if run_button:
 
     # 5) Sub-stratification labels
     # Ensure consistent sorting at ethnicity
-    eth_order = ["Shqiptar", "Serb", "Tjerë"]
+    if group_ethnicities:
+        eth_order = ["Shqiptar", "Serb", "Tjerë"]
+    else:
+        eth_order = list(UNGROUPED_ETH_CATEGORIES)
     df["Etnia"] = pd.Categorical(df["Etnia"], categories=eth_order, ordered=True)
 
     # Combine ethnicity with settlement
@@ -3103,14 +3187,14 @@ if run_button:
     ###########################################
     # FIX MAJORITY ETHNICITY CALCULATION HERE
     ###########################################
-    if "Etnia" in sub_options:
+    if "Etnia" in sub_options and group_ethnicities:
         eth_majority = {}
 
         for kom in pivot.index:
             totals = {}
-            
+
             # Find all ethnicity groups dynamically
-            for eth in ["Shqiptar", "Serb", "Tjerë"]:
+            for eth in eth_order:
                 cols = [c for c in pivot.columns if c.startswith(eth)]
                 total = sum(pivot.at[kom, c] for c in cols)
                 totals[eth] = total
@@ -3130,18 +3214,24 @@ if run_button:
         # FIX MAJORITY ETHNICITY CALCULATION HERE
         ###########################################
 
-    pivot = fix_minimum_allocations(
-            pivot=pivot,
-            df_eth= df_eth,
-            region_map=region_map,
-            strata_col = original_strata_cols,
-            majority=majority,
-            selected_ethnicity=eth_filter,
-            min_total=3,   # minimum anketa per komunë
-            min_eth=3      # minimum per vendbanim (Urban/Rural)
-            )
-    
-    pivot = pivot[pivot["Total"] != 0]
+    if group_ethnicities:
+        pivot = fix_minimum_allocations(
+                pivot=pivot,
+                df_eth= df_eth,
+                region_map=region_map,
+                strata_col = original_strata_cols,
+                majority=majority,
+                selected_ethnicity=eth_filter,
+                min_total=3,   # minimum anketa per komunë
+                min_eth=3      # minimum per vendbanim (Urban/Rural)
+                )
+
+        pivot = pivot[pivot["Total"] != 0]
+    else:
+        # Ungrouped ethnicities → straight proportional allocation, no minimum
+        # reallocation / majority-donor logic.
+        pivot = pivot[pivot["Total"] != 0]
+        pivot.loc["Total"] = pivot.sum(numeric_only=True)
 
     # ==========================================================
     # RECALCULATE NON-OVERSAMPLED CATEGORIES AFTER FIX ALLOCATION
@@ -3199,10 +3289,7 @@ if run_button:
     else:
         settlement_text = "Urban, Rural"
 
-    if len(eth_filter) == 1 or len(eth_filter) == 2:
-        ethnicity_text = ", ".join(eth_filter)
-    else:
-        ethnicity_text = "Shqiptar, Serb, Tjerë"
+    ethnicity_text = ", ".join(eth_filter) if eth_filter else "—"
 
     if oversample_enabled:
         parts = []
