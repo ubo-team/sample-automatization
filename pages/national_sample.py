@@ -2999,9 +2999,11 @@ if run_button:
 
         # për çdo kuotë të atij variabli
         used_total = 0
+        os_union = pd.Series(False, index=grouped.index)
         for entry in entry_list:
             nA = int(entry["n"])
             maskA = mask_for_oversample(grouped, varA, entry)
+            os_union = os_union | maskA
 
             alloc_A = alloc_to_mask(maskA, nA)
             grouped["n_alloc"] += alloc_A
@@ -3012,7 +3014,10 @@ if run_button:
         if remaining < 0:
             remaining = 0
 
-        mask_rest = (grouped["n_alloc"] == 0)
+        # Përjashto TË GJITHA stratat e oversample-uara nga pjesa e mbetur.
+        # (Mos përdor n_alloc==0: një str: e oversample-uar mund të rrumbullakohet
+        #  në 0 dhe ndryshe do të merrte kuotë shtesë, duke e tejkaluar kuotën.)
+        mask_rest = ~os_union
         alloc_rest = alloc_to_mask(mask_rest, remaining)
 
         grouped["n_alloc"] += alloc_rest
