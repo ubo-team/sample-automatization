@@ -603,7 +603,11 @@ def mask_for_oversample(grouped, variable, params):
         return grouped[base_col] == params["value"]
 
     if variable == "Regjion":
-        return grouped[base_col] == params["value"]
+        # base_col është gjithmonë "Komuna" (alokimi bëhet në nivel komune),
+        # prandaj mapo komunat → regjion dhe krahaso me regjionin e zgjedhur.
+        # (Mos krahaso grouped[base_col]==value: do të kapte vetëm komunën që ka
+        #  të njëjtin emër me regjionin, jo të gjitha komunat e regjionit.)
+        return grouped[base_col].map(region_map) == params["value"]
 
     if variable == "Vendbanimi":
         return grouped["Sub"].str.endswith(params["value"])
