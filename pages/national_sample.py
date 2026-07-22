@@ -1918,7 +1918,8 @@ def compute_population_coefficients(
     eth_filter,
     settlement_filter,
     komuna_filter,
-    data_collection_method
+    data_collection_method,
+    custom_age_groups=None
 ):
     """
     REWRITTEN: Professional calculation of population weights.
@@ -2069,7 +2070,9 @@ def compute_population_coefficients(
     # -------------------------------------------------------------
     # 8) GRUPMOSHA - Direct count from age-filtered population with dynamic bins
     # -------------------------------------------------------------
-    merged_bins, labels = create_dynamic_age_groups(min_age, max_age, data_collection_method)
+    merged_bins, labels = create_dynamic_age_groups(
+        min_age, max_age, data_collection_method, custom_groups=custom_age_groups
+    )
     age_totals = {label: 0 for label in labels}
     
     for kom in komuna_filter:
@@ -2220,11 +2223,94 @@ def add_codes_to_coef_df(coef_df, data_collection_method):
 
     return coef_df
 
-def create_dynamic_age_groups(age_min, age_max, data_collection_method):
+def parse_custom_age_groups(text, age_min, age_max):
+    """
+    Parses a user-supplied age-group string into (merged_bins, labels).
+
+    Accepted format: comma-separated tokens, each either "lo-hi" or "lo+".
+    Example: "18-24, 25-34, 35-49, 50+"
+
+    Returns (merged_bins, labels) in the SAME shape as create_dynamic_age_groups,
+    or None if the text is invalid so callers can flag it.
+
+    The spec is validated STRICTLY (no silent clipping): it is rejected if
+    any token is malformed, has lo > hi, falls outside [age_min, age_max],
+    or if any two groups overlap.
+    """
+    if not text or not str(text).strip():
+        return None
+
+    upper_limit = 200 if age_max is None else int(age_max)
+    lower_limit = int(age_min)
+
+    # Normalise dashes and split on commas.
+    cleaned = str(text).replace("–", "-").replace("—", "-")
+    tokens = [t.strip() for t in cleaned.split(",") if t.strip()]
+
+    bins = []
+    for tok in tokens:
+        try:
+            if tok.endswith("+"):
+                lo = int(tok[:-1].strip())
+                # Open-ended only makes sense when there is no upper age limit.
+                hi = 200 if age_max is None else int(age_max)
+            elif "-" in tok:
+                lo_str, hi_str = tok.split("-", 1)
+                lo = int(lo_str.strip())
+                hi = int(hi_str.strip())
+            else:
+                # A bare number (e.g. "18") is not a valid group — a group
+                # must be a range "lo-hi" or an open-ended "lo+".
+                return None
+        except (ValueError, AttributeError):
+            # Any malformed token invalidates the whole custom spec.
+            return None
+
+        # lo must not exceed hi.
+        if lo > hi:
+            return None
+
+        # Every group must lie fully within the selected age range.
+        if lo < lower_limit or hi > upper_limit:
+            return None
+
+        bins.append((lo, hi))
+
+    if not bins:
+        return None
+
+    # Sort by lower bound and reject any overlap between consecutive groups.
+    bins.sort(key=lambda x: x[0])
+    for (lo, hi), (next_lo, _) in zip(bins, bins[1:]):
+        if next_lo <= hi:
+            return None
+
+    labels = []
+    for lo, hi in bins:
+        if age_max is None and hi >= 200:
+            labels.append(f"{lo}+")
+        else:
+            labels.append(f"{lo}-{hi}")
+
+    return bins, labels
+
+
+def create_dynamic_age_groups(age_min, age_max, data_collection_method,
+                              custom_groups=None):
     """
     Creates dynamic age bins that start at `age_min` instead of fixed 18.
     Handles merging of too-small bins automatically.
+
+    If `custom_groups` (a user-supplied string like "18-24, 25-34, 50+") is
+    provided and valid, those bins are used instead of the predefined defaults.
     """
+
+    # -----------------------------------------
+    # 0. User-defined age groups take priority
+    # -----------------------------------------
+    parsed = parse_custom_age_groups(custom_groups, age_min, age_max)
+    if parsed is not None:
+        return parsed
 
     # -----------------------------------------
     # 1. Determine default base boundaries
@@ -2349,7 +2435,9 @@ def generate_spss_syntax(coef_df, recode_d3_text, data_collection_method):
     # --------------------------------------------
     # 3. RECODE për Grupmoshat (D2) — standarde ose dinamike
     # --------------------------------------------
-    merged_bins, labels = create_dynamic_age_groups(min_age, max_age, data_collection_method)
+    merged_bins, labels = create_dynamic_age_groups(
+        min_age, max_age, data_collection_method, custom_groups=custom_age_groups
+    )
     out += generate_recode_age_dynamic(merged_bins, labels)
 
 
@@ -2616,6 +2704,23 @@ max_age = st.sidebar.text_input(
 
 max_age = int(max_age) if max_age.strip() else None
 
+custom_age_groups = st.sidebar.text_input(
+    "Grupmoshat e personalizuara (opsionale)",
+    help=(
+        "Lëre bosh për të përdorur grupmoshat e paracaktuara. "
+        "Ose shkruaj grupmoshat vetë, të ndara me presje, p.sh. "
+        "18-24, 25-34, 35-49, 50+. Përdor '+' për grupin e fundit të hapur."
+    ),
+    placeholder="18-24, 25-34, 35-49, 50+"
+)
+
+# Validate custom age groups. Invalid input must NOT silently fall back to
+# defaults — it blocks generation and the error is shown in the main area below.
+custom_age_groups_valid = True
+if custom_age_groups.strip():
+    if parse_custom_age_groups(custom_age_groups, min_age, max_age) is None:
+        custom_age_groups_valid = False
+
 # Ethnicity filter (these also act as possible sub-dimensions if Etnia selected)
 if group_ethnicities:
     eth_options = ["Shqiptar", "Serb", "Tjerë"]
@@ -2768,7 +2873,14 @@ run_button = st.sidebar.button("Gjenero shpërndarjen e mostrës")
 # MAIN LOGIC
 # =========================
 
-if run_button:
+if not custom_age_groups_valid:
+    st.error(
+        "Grupmoshat e personalizuara nuk janë të vlefshme ose bien jashtë "
+        "intervalit të moshës. Korrigjoji para se të gjenerosh mostrën "
+        "(p.sh. 18-24, 25-34, 50+)."
+    )
+
+elif run_button:
 
     # 1) Filter ethnicity & settlement (these are demographic filters)
     df = df_eth.copy()
@@ -3623,7 +3735,8 @@ if run_button:
     eth_filter=eth_filter,
     settlement_filter=settlement_filter,
     komuna_filter=komuna_filter,
-    data_collection_method=data_collection_method
+    data_collection_method=data_collection_method,
+    custom_age_groups=custom_age_groups
     )
 
     coef_df = add_codes_to_coef_df(coef_df, data_collection_method)
