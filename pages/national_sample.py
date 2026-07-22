@@ -2233,15 +2233,18 @@ def parse_custom_age_groups(text, age_min, age_max):
     Returns (merged_bins, labels) in the SAME shape as create_dynamic_age_groups,
     or None if the text is invalid so callers can flag it.
 
-    The spec is validated STRICTLY (no silent clipping): it is rejected if
-    any token is malformed, has lo > hi, falls outside [age_min, age_max],
-    or if any two groups overlap.
+    The spec is validated STRICTLY (no silent clipping). It is rejected unless
+    the groups form a complete, gap-free, non-overlapping cover of the selected
+    age range: each token must be well-formed, the first group must start at
+    age_min, consecutive groups must be contiguous (next lo == previous hi + 1),
+    and the last group must reach the upper limit (age_max, or open-ended when
+    there is no max).
     """
     if not text or not str(text).strip():
         return None
 
-    upper_limit = 200 if age_max is None else int(age_max)
     lower_limit = int(age_min)
+    upper_limit = 200 if age_max is None else int(age_max)
 
     # Normalise dashes and split on commas.
     cleaned = str(text).replace("–", "-").replace("—", "-")
@@ -2252,8 +2255,8 @@ def parse_custom_age_groups(text, age_min, age_max):
         try:
             if tok.endswith("+"):
                 lo = int(tok[:-1].strip())
-                # Open-ended only makes sense when there is no upper age limit.
-                hi = 200 if age_max is None else int(age_max)
+                # Open-ended group runs to the upper limit of the range.
+                hi = upper_limit
             elif "-" in tok:
                 lo_str, hi_str = tok.split("-", 1)
                 lo = int(lo_str.strip())
@@ -2279,10 +2282,19 @@ def parse_custom_age_groups(text, age_min, age_max):
     if not bins:
         return None
 
-    # Sort by lower bound and reject any overlap between consecutive groups.
+    # Sort by lower bound.
     bins.sort(key=lambda x: x[0])
+
+    # The groups must COVER the whole range with no gaps and no overlaps:
+    #   - first group starts exactly at the minimum age
+    #   - each group starts right after the previous one ends
+    #   - last group reaches the upper limit
+    if bins[0][0] != lower_limit:
+        return None
+    if bins[-1][1] != upper_limit:
+        return None
     for (lo, hi), (next_lo, _) in zip(bins, bins[1:]):
-        if next_lo <= hi:
+        if next_lo != hi + 1:
             return None
 
     labels = []
@@ -2707,9 +2719,12 @@ max_age = int(max_age) if max_age.strip() else None
 custom_age_groups = st.sidebar.text_input(
     "Grupmoshat e personalizuara (opsionale)",
     help=(
-        "Lëre bosh për të përdorur grupmoshat e paracaktuara. "
-        "Ose shkruaj grupmoshat vetë, të ndara me presje, p.sh. "
-        "18-24, 25-34, 35-49, 50+. Përdor '+' për grupin e fundit të hapur."
+        "Lëre bosh për të përdorur grupmoshat e paracaktuara. Ose shkruaj "
+        "grupmoshat vetë, të ndara me presje. Ato duhet të mbulojnë të gjithë "
+        "intervalin e moshës pa boshllëqe dhe pa mbivendosje: grupi i parë "
+        "fillon te mosha minimale dhe grupi i fundit arrin te mosha maksimale. "
+        "Nëse s'ka moshë maksimale, përdor '+' për grupin e fundit të hapur, "
+        "p.sh. 18-29, 30-39, 40-49, 50+."
     ),
     placeholder="18-24, 25-34, 35-49, 50+"
 )
@@ -2875,9 +2890,11 @@ run_button = st.sidebar.button("Gjenero shpërndarjen e mostrës")
 
 if not custom_age_groups_valid:
     st.error(
-        "Grupmoshat e personalizuara nuk janë të vlefshme ose bien jashtë "
-        "intervalit të moshës. Korrigjoji para se të gjenerosh mostrën "
-        "(p.sh. 18-24, 25-34, 50+)."
+        "Grupmoshat e personalizuara nuk janë të vlefshme. Ato duhet të "
+        "mbulojnë të gjithë intervalin e moshës pa boshllëqe dhe pa "
+        "mbivendosje — grupi i parë të fillojë te mosha minimale dhe i fundit "
+        "të arrijë te mosha maksimale (p.sh. 18-29, 30-39, 40-49, 50+). "
+        "Korrigjoji para se të gjenerosh mostrën."
     )
 
 elif run_button:
